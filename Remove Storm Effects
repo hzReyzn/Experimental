@@ -1,0 +1,38 @@
+
+local Players = game:GetService("Players")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local targets = {
+    sandstormgui = true,
+    blizzardgui = true
+}
+
+local function removeStormEffect(obj)
+    if not obj:IsA("ScreenGui") then
+        return
+    end
+
+    if not targets[obj.Name:lower()] then
+        return
+    end
+
+    print("[Anti Storm] Eliminado:", obj.Name)
+    obj:Destroy()
+end
+
+-- Eliminar efectos existentes
+for _, obj in ipairs(playerGui:GetDescendants()) do
+    removeStormEffect(obj)
+end
+
+-- Eliminar automáticamente efectos nuevos
+playerGui.DescendantAdded:Connect(function(obj)
+    task.defer(function()
+        if obj.Parent then
+            removeStormEffect(obj)
+        end
+    end)
+end)
+
+print("[Anti Storm] Protección activa")
