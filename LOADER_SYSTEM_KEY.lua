@@ -826,20 +826,21 @@ local function setSubmitBusy(busy)
         or "VERIFY & LAUNCH"
 end
 
--- Loading/verification display: original Reyzn X surface, chrome, background,
--- emblem, neon and fire factories, rather than a redesigned loader GUI.
+-- Loading/verification display: original Reyzn X surface, chrome, emblem,
+-- neon and fire factories. The full-screen host is transparent, leaving the
+-- game visible behind the smaller, centered loading panel.
 UI.keySplash=frame(UI.screen,"KeySystemLoadingScreen",
-    UDim2.fromScale(0,0),UDim2.fromScale(1,1),C.black,.07,"fixed")
+    UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1,"fixed")
 UI.keySplash.ZIndex=21
 UI.keySplash.Visible=false
 UI.keySplash.Active=true
-gradient(UI.keySplash,{C.base,C.black,C.panel},98)
+-- No black full-screen backdrop: only the Reyzn X loading panel is opaque.
 UI.keySplashPanel,UI.keySplashFX=surface(UI.keySplash,"KeySplashPanel",
-    UDim2.fromScale(.5,.5),UDim2.fromOffset(485,316),"fixed")
+    UDim2.fromScale(.5,.5),UDim2.fromOffset(400,255),"fixed")
 UI.keySplashPanel.AnchorPoint=Vector2.new(.5,.5)
 UI.keySplashPanel.ZIndex=23
 UI.keySplashAura=UpdraftFire.new(UI.keySplash,
-    "KeySplashFlames","fixed",485,316,true,{8,4,6,4})
+    "KeySplashFlames","fixed",400,255,true,{6,3,5,3})
 UI.keySplashAura.host.AnchorPoint=Vector2.new(.5,.5)
 UI.keySplashAura.host.Position=UDim2.fromScale(.5,.5)
 UI.keySplashAura.host.ZIndex=22
@@ -892,8 +893,8 @@ local function resizeKeySplash()
     if not state.alive or not UI.screen then return end
     local screen=UI.screen.AbsoluteSize
     if screen.X<1 or screen.Y<1 then return end
-    local width=math.max(205,math.min(485,screen.X-34))
-    local height=math.max(218,math.min(316,screen.Y-30))
+    local width=math.max(190,math.min(400,screen.X-40))
+    local height=math.max(210,math.min(255,screen.Y-40))
     UI.keySplashPanel.Size=UDim2.fromOffset(width,height)
     UI.keySplashAura.host.Size=UDim2.fromOffset(width,height)
     UI.keySplashLogo.Position=UDim2.new(.5,-34,0,8)
