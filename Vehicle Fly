@@ -1,4 +1,4 @@
--- REYZN VEHICLE FLY 1.2 | COMPACT AMETHYST EDITION
+-- REYZN VEHICLE FLY 1.3 | DUAL-PANEL AMETHYST EDITION
 -- Standalone vehicle flight interface, based on authentic Reyzn X styling.
 -- Changes only hzReyzn/Experimental/Vehicle Fly, never Ghislain.
 -- Joystick / WASD: horizontal steering. E/Q or touch UP/DOWN: altitude.
@@ -305,7 +305,7 @@ end
 -- Standalone ScreenGui and animation scopes
 UI.gui=make("ScreenGui",playerGui,{Name="ReyznVehicleFly",ResetOnSpawn=false,DisplayOrder=67,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,IgnoreGuiInset=false})
 pcall(function() UI.gui.ScreenInsets=Enum.ScreenInsets.CoreUISafeInsets end)
-UI.gui:SetAttribute("Version","1.2")
+UI.gui:SetAttribute("Version","1.3")
 UI.gui:SetAttribute("Design","Reyzn X | Amethyst Edition")
 UI.gui:SetAttribute("FlightEnabled",false)
 UI.windowFade=make("NumberValue",UI.gui,{Name="WindowOpacity",Value=1})
@@ -314,7 +314,7 @@ UI.paneProgress=make("NumberValue",UI.gui,{Name="PaneProgress",Value=1})
 UI.pageFade=make("NumberValue",UI.gui,{Name="PageOpacity",Value=1})
 UI.zoom=make("NumberValue",UI.gui,{Name="Zoom",Value=1})
 UI.screen=frame(UI.gui,"SafeArea",UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1)
-UI.window=frame(UI.screen,"Window",UDim2.fromOffset(40,50),UDim2.fromOffset(348,238),nil,1,"window")
+UI.window=frame(UI.screen,"Window",UDim2.fromOffset(40,50),UDim2.fromOffset(496,238),nil,1,"window")
 UI.window.ZIndex=3
 UI.window.ClipsDescendants=false
 UI.scale=make("UIScale",UI.window,{Scale=1})
@@ -802,55 +802,126 @@ function features.fly:destroy()
     removePhysics()
 end
 
--- A single compact Reyzn X panel, retaining authentic original visual helpers.
-UI.panel,UI.panelFx=surface(UI.window,"AmethystPanel",UDim2.fromOffset(0,0),UDim2.fromOffset(348,238),"window")
+-- Adapted Vfly-style arrangement, using original Reyzn X Amethyst button/surface/VFX systems.
+-- The UI has two compact columns: speed/fly, and three flight-direction options.
+local flightDirection={lookUpDown=true,lockDirection=false,yawOffset=0,lockedLook=nil,lockedRight=nil}
+local optionPanelOpen=true
+
+UI.panel,UI.panelFx=surface(UI.window,"AmethystPanel",UDim2.fromOffset(0,0),UDim2.fromOffset(496,238),"window")
 UI.panel.ZIndex=3
-UI.fire=UpdraftFire.new(UI.window,"AmethystFire","window",348,238,true,{5,8,5,8})
-UI.header=label(UI.panel,"Title","VEHICLE FLY",UDim2.fromOffset(17,7),UDim2.new(1,-111,0,35),23,C.white,OPTION_FONT)
+UI.fire=UpdraftFire.new(UI.window,"AmethystFire","window",496,238,true,{6,10,6,10})
+
+UI.header=label(UI.panel,"Title","VEHICLE FLY",UDim2.fromOffset(17,7),UDim2.fromOffset(210,35),22,C.white,OPTION_FONT)
 UI.header.ZIndex=5
-local topLine=frame(UI.panel,"HeaderLine",UDim2.fromOffset(17,44),UDim2.new(1,-34,0,1),C.violet,.38)
+local topLine=frame(UI.panel,"HeaderLine",UDim2.fromOffset(16,44),UDim2.new(1,-32,0,1),C.violet,.38)
 topLine.ZIndex=5
 gradient(topLine,{C.deep,C.violet,C.cyan,C.deep},0)
-UI.dragBar=frame(UI.panel,"DragBar",UDim2.fromOffset(0,0),UDim2.new(1,-100,0,46),nil,1)
+
+UI.dragBar=frame(UI.panel,"DragBar",UDim2.fromOffset(0,0),UDim2.fromOffset(390,45),nil,1)
 UI.dragBar.ZIndex=8
 UI.dragBar.Active=true
 
-local function compactButton(parent,name,title,x,y,w,h)
+local function compactButton(parent,name,title,x,y,w,h,fontSize)
     local b,fx=button(parent,name,UDim2.fromOffset(x,y),UDim2.fromOffset(w,h))
-    local text=label(b,"Caption",title,UDim2.fromScale(0,0),UDim2.fromScale(1,1),18,C.white,OPTION_FONT)
-    text.TextXAlignment=Enum.TextXAlignment.Center
-    text.ZIndex=6
-    text.Active=false
-    return b,fx
+    local caption=label(b,"Caption",title,UDim2.fromScale(0,0),UDim2.fromScale(1,1),fontSize or 18,C.white,OPTION_FONT)
+    caption.TextXAlignment=Enum.TextXAlignment.Center
+    caption.TextWrapped=false
+    caption.ZIndex=6
+    caption.Active=false
+    return b,fx,caption
 end
-UI.minButton=compactButton(UI.panel,"Minimize","−",263,9,34,30)
-UI.closeButton=compactButton(UI.panel,"Close","×",302,9,34,30)
-UI.minButton.ZIndex=9
-UI.closeButton.ZIndex=9
 
-UI.flightToggle=FeatureToggle.new(UI.panel,"VehicleFly","Vehicle Fly",features.fly)
-UI.flightToggle.button.Position=UDim2.fromOffset(13,58)
-UI.flightToggle:resize(334)
+UI.minButton=compactButton(UI.panel,"Minimize","−",412,9,34,30)
+UI.closeButton=compactButton(UI.panel,"Close","×",452,9,34,30)
+UI.minButton.ZIndex=10
+UI.closeButton.ZIndex=10
 
-local speedName=label(UI.panel,"SpeedName","SPEED",UDim2.fromOffset(17,136),UDim2.fromOffset(104,23),16,C.silver,OPTION_FONT)
-speedName.ZIndex=5
-UI.speedMinus=compactButton(UI.panel,"SpeedMinus","−",123,130,46,35)
-UI.speedValue=label(UI.panel,"SpeedValue",tostring(speed),UDim2.fromOffset(173,133),UDim2.fromOffset(72,31),20,C.chrome,Enum.Font.RobotoMono)
+-- SPEED and FLY on the left, matching the reference without extra captions.
+local leftCaption=label(UI.panel,"SpeedName","SPEED",UDim2.fromOffset(20,54),UDim2.fromOffset(104,24),15,C.silver,OPTION_FONT)
+leftCaption.ZIndex=5
+UI.speedMinus=compactButton(UI.panel,"SpeedMinus","−",19,84,58,43)
+UI.speedValue=label(UI.panel,"SpeedValue",tostring(speed),UDim2.fromOffset(82,87),UDim2.fromOffset(82,38),24,C.chrome,Enum.Font.RobotoMono)
 UI.speedValue.TextXAlignment=Enum.TextXAlignment.Center
 UI.speedValue.ZIndex=5
-UI.speedPlus=compactButton(UI.panel,"SpeedPlus","+",249,130,46,35)
+UI.speedPlus=compactButton(UI.panel,"SpeedPlus","+",169,84,58,43)
 local function changeSpeed(diff)
     speed=math.clamp(speed+diff,20,320)
     UI.speedValue.Text=tostring(speed)
     UI.gui:SetAttribute("FlightSpeed",speed)
 end
-connect(UI.speedMinus.Activated,function()changeSpeed(-15)end)
-connect(UI.speedPlus.Activated,function()changeSpeed(15)end)
+connect(UI.speedMinus.Activated,function()changeSpeed(-1)end)
+connect(UI.speedPlus.Activated,function()changeSpeed(1)end)
 UI.gui:SetAttribute("FlightSpeed",speed)
 
-UI.status=label(UI.panel,"Status","OFF",UDim2.fromOffset(17,184),UDim2.new(1,-34,0,29),16,C.cyan,OPTION_FONT)
-UI.status.ZIndex=5
+UI.flyButton,UI.flyFx,UI.flyCaption=compactButton(UI.panel,"Fly","FLY",19,142,208,56,25)
+UI.flyCaption.TextColor3=C.white
+
+UI.status=label(UI.panel,"Status","OFF",UDim2.fromOffset(19,204),UDim2.fromOffset(207,21),14,C.cyan,OPTION_FONT)
 UI.status.TextXAlignment=Enum.TextXAlignment.Center
+UI.status.ZIndex=5
+local split=frame(UI.panel,"Divider",UDim2.fromOffset(248,61),UDim2.fromOffset(1,162),C.violet,.63)
+split.ZIndex=5
+gradient(split,{C.deep,C.cyan,C.deep},90)
+UI.optionDivider=split
+
+-- Right column: polished Amethyst alternatives to the screenshot's green/red blocks.
+UI.optionPanel=frame(UI.panel,"OptionPanel",UDim2.fromOffset(270,53),UDim2.fromOffset(212,170),nil,1)
+UI.optionPanel.ZIndex=5
+UI.lookButton,UI.lookFx,UI.lookCaption=compactButton(UI.optionPanel,"LookUpDown","LOOK UP/DOWN : ON",0,0,212,50,16)
+UI.lockButton,UI.lockFx,UI.lockCaption=compactButton(UI.optionPanel,"LockDirection","LOCK DIRECTION : OFF",0,57,212,50,16)
+UI.rotateButton,UI.rotateFx,UI.rotateCaption=compactButton(UI.optionPanel,"RotateYaw","ROTATE Y (+45°)",0,114,212,50,16)
+
+UI.foldButton=compactButton(UI.panel,"FoldOptions","<",233,114,28,40,17)
+UI.foldButton.ZIndex=8
+
+local function paintOptions()
+    UI.lookCaption.Text=flightDirection.lookUpDown and "LOOK UP/DOWN : ON" or "LOOK UP/DOWN : OFF"
+    UI.lockCaption.Text=flightDirection.lockDirection and "LOCK DIRECTION : ON" or "LOCK DIRECTION : OFF"
+    tween(UI.lookFx.selection,.22,{Value=flightDirection.lookUpDown and 1 or 0})
+    tween(UI.lockFx.selection,.22,{Value=flightDirection.lockDirection and 1 or 0})
+    UI.gui:SetAttribute("LookUpDown",flightDirection.lookUpDown)
+    UI.gui:SetAttribute("LockDirection",flightDirection.lockDirection)
+    UI.gui:SetAttribute("YawOffset",flightDirection.yawOffset)
+end
+
+connect(UI.lookButton.Activated,function()
+    flightDirection.lookUpDown=not flightDirection.lookUpDown
+    paintOptions()
+end)
+connect(UI.lockButton.Activated,function()
+    flightDirection.lockDirection=not flightDirection.lockDirection
+    if flightDirection.lockDirection then
+        local camera=workspace.CurrentCamera
+        flightDirection.lockedLook=camera and camera.CFrame.LookVector or Vector3.new(0,0,-1)
+        flightDirection.lockedRight=camera and camera.CFrame.RightVector or Vector3.new(1,0,0)
+    else
+        flightDirection.lockedLook=nil
+        flightDirection.lockedRight=nil
+    end
+    paintOptions()
+end)
+connect(UI.rotateButton.Activated,function()
+    flightDirection.yawOffset=(flightDirection.yawOffset+45)%360
+    UI.gui:SetAttribute("YawOffset",flightDirection.yawOffset)
+    tween(UI.rotateFx.energy,.14,{Value=1})
+    task.delay(.22,function()
+        if state.alive then tween(UI.rotateFx.energy,.20,{Value=0}) end
+    end)
+end)
+
+local function paintFly()
+    local isOn=features.fly.enabled
+    UI.flyCaption.Text=isOn and "FLY : ON" or "FLY"
+    tween(UI.flyFx.selection,.23,{Value=isOn and 1 or 0})
+    UI.gui:SetAttribute("FlightEnabled",isOn)
+end
+connect(UI.flyButton.Activated,function()
+    features.fly:setEnabled(not features.fly.enabled)
+    paintFly()
+end)
+
+paintOptions()
+paintFly()
 
 -- Minimized Reyzn R launcher, independent of the panel.
 UI.launcher=make("ImageButton",UI.screen,{
@@ -867,10 +938,13 @@ UI.launcherLetter=label(UI.launcher,"R","R",UDim2.fromScale(0,0),UDim2.fromScale
 UI.launcherLetter.TextXAlignment=Enum.TextXAlignment.Center
 UI.launcherLetter.ZIndex=17
 UI.launcherImage=imageLabel(UI.launcher,"OriginalLogo",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
-UI.launcherImage.ImageRectOffset=Vector2.new(88,104)
-UI.launcherImage.ImageRectSize=Vector2.new(1080,1040)
+UI.launcherImage.ScaleType=Enum.ScaleType.Fit
+UI.launcherImage.ImageRectOffset=Vector2.zero
+UI.launcherImage.ImageRectSize=Vector2.zero
+UI.launcherImage.ImageColor3=Color3.new(1,1,1)
 UI.launcherImage.ZIndex=17
 UI.launcherFire=UpdraftFire.new(UI.launcher,"LauncherFire","launcher",58,58,false)
+UI.launcherLetter.TextColor3=C.cyan
 
 -- Only UP and DOWN float on screen. Horizontal motion uses the native joystick.
 UI.pad=frame(UI.screen,"AltitudeControls",UDim2.new(1,-198,1,-96),UDim2.fromOffset(186,74),C.base,.21,"fixed")
@@ -995,16 +1069,28 @@ connect(RunService.Heartbeat,function()
     if not armed.velocity then return end
 
     local camera=workspace.CurrentCamera
-    local look=camera and camera.CFrame.LookVector or targetRoot.CFrame.LookVector
-    local right=camera and camera.CFrame.RightVector or targetRoot.CFrame.RightVector
-    local forward=Vector3.new(look.X,0,look.Z)
-    if forward.Magnitude<.001 then
-        forward=Vector3.new(targetRoot.CFrame.LookVector.X,0,targetRoot.CFrame.LookVector.Z)
+    local cameraLook=camera and camera.CFrame.LookVector or targetRoot.CFrame.LookVector
+    local cameraRight=camera and camera.CFrame.RightVector or targetRoot.CFrame.RightVector
+    local look=flightDirection.lockDirection and flightDirection.lockedLook or cameraLook
+    local right=flightDirection.lockDirection and flightDirection.lockedRight or cameraRight
+    look=look or cameraLook
+    right=right or cameraRight
+
+    -- Rotate all steering axes around the world Y axis in 45° increments.
+    local rotation=CFrame.fromAxisAngle(Vector3.yAxis,math.rad(flightDirection.yawOffset))
+    look=rotation:VectorToWorldSpace(look)
+    right=rotation:VectorToWorldSpace(right)
+    local flatLook=Vector3.new(look.X,0,look.Z)
+    if flatLook.Magnitude<.001 then
+        flatLook=Vector3.new(targetRoot.CFrame.LookVector.X,0,targetRoot.CFrame.LookVector.Z)
     end
-    if forward.Magnitude<.001 then forward=Vector3.new(0,0,-1) end
-    forward=forward.Unit
+    if flatLook.Magnitude<.001 then flatLook=Vector3.new(0,0,-1) end
+    flatLook=flatLook.Unit
+
+    -- Look Up/Down ON includes camera pitch when flying forward.
+    local forward=flightDirection.lookUpDown and look.Unit or flatLook
     local side=Vector3.new(right.X,0,right.Z)
-    if side.Magnitude<.001 then side=Vector3.new(-forward.Z,0,forward.X) end
+    if side.Magnitude<.001 then side=Vector3.new(-flatLook.Z,0,flatLook.X) end
     side=side.Unit
 
     local x,z=horizontalInput()
@@ -1013,32 +1099,45 @@ connect(RunService.Heartbeat,function()
     if direction.Magnitude>1 then direction=direction.Unit end
     armed.velocity.VectorVelocity=direction*speed
     if armed.orientation then
-        armed.orientation.CFrame=CFrame.lookAt(Vector3.zero,forward,Vector3.yAxis)
+        armed.orientation.CFrame=CFrame.lookAt(Vector3.zero,flatLook,Vector3.yAxis)
     end
 end)
 
--- Smaller resizable-safe single window. No pages, nav list or extra settings.
+-- Single compact Vfly arrangement, with an optional folding settings wing.
 local function adjustLayout(initial)
     local vp=UI.screen.AbsoluteSize
     if vp.X<=1 or vp.Y<=1 then
         local camera=workspace.CurrentCamera
         vp=camera and camera.ViewportSize or Vector2.new(900,560)
     end
-    -- Keep the original precise button layout but render it ~12% smaller.
-    local available=math.min(1,(vp.X-20)/348,(vp.Y-30)/238)
-    local factor=math.max(.55,available)*.88
+    local windowWidth=optionPanelOpen and 496 or 251
+    local windowHeight=238
+    local factor=math.min(.94,(vp.X-16)/windowWidth,(vp.Y-20)/windowHeight)
+    factor=math.max(.48,factor)
     UI.scale.Scale=factor
-    UI.window.Size=UDim2.fromOffset(348,238)
-    UI.panel.Size=UDim2.fromOffset(348,238)
-    UI.fire.host.Size=UDim2.fromOffset(348,238)
+    UI.window.Size=UDim2.fromOffset(windowWidth,windowHeight)
+    UI.panel.Size=UDim2.fromOffset(windowWidth,windowHeight)
+    UI.fire.host.Size=UDim2.fromOffset(windowWidth,windowHeight)
+    UI.optionPanel.Visible=optionPanelOpen
+    UI.optionDivider.Visible=optionPanelOpen
+    UI.minButton.Position=UDim2.fromOffset(optionPanelOpen and 412 or 167,9)
+    UI.closeButton.Position=UDim2.fromOffset(optionPanelOpen and 452 or 207,9)
+    UI.foldButton.Position=UDim2.fromOffset(optionPanelOpen and 233 or 219,114)
+    UI.foldButton.Caption.Text=optionPanelOpen and "<" or ">"
+    UI.dragBar.Size=UDim2.fromOffset(optionPanelOpen and 390 or 150,45)
+    UI.header.TextSize=optionPanelOpen and 22 or 18
     if initial then
         UI.window.Position=UDim2.fromOffset(
-            math.max(4,math.floor((vp.X-348*factor)/2)),
-            math.max(4,math.floor((vp.Y-238*factor)/2))
+            math.max(6,math.floor((vp.X-windowWidth*factor)/2)),
+            math.max(6,math.floor((vp.Y-windowHeight*factor)/2))
         )
     end
     UI.pad.Position=UDim2.new(1,-198,1,-math.min(116,math.max(82,vp.Y*.18)))
 end
+connect(UI.foldButton.Activated,function()
+    optionPanelOpen=not optionPanelOpen
+    adjustLayout(false)
+end)
 
 local function minimize(yes)
     minimized=yes
@@ -1106,7 +1205,7 @@ local assetRoot="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/
 local assets={
     {"background-cyber-v2.jpg","jpg",artworkImages.Background},
     {"flame-wisp-v1.png","png",VFX.images},
-    {"launcher-r-v1.png","png",{UI.launcherImage}}
+    {"vehicle-fly-blue-logo.png","png",{UI.launcherImage},"https://raw.githubusercontent.com/hzReyzn/Experimental/main/assets/vehicle-fly-blue-logo.png"}
 }
 for _,spec in ipairs(assets)do
     spawn(function()
@@ -1119,7 +1218,7 @@ for _,spec in ipairs(assets)do
             if ok and type(result)=="string" then url=result end
         end
         if not url then
-            local ok,data=pcall(function()return game:HttpGet(assetRoot..spec[1])end)
+            local ok,data=pcall(function()return game:HttpGet(spec[4] or assetRoot..spec[1])end)
             if not state.alive then return end
             if ok and type(data)=="string" and #data>1000 then
                 local valid=(spec[2]=="jpg" and data:sub(1,3)=="\255\216\255")
@@ -1158,7 +1257,7 @@ connect(RunService.RenderStepped,function(dt)
         UI.panelFx.inward:update(phase,state.burst)
         UI.panelFx.neon:update(phase,.12)
         UI.panelFx.beamGradient.Offset=Vector2.new(math.sin(phase*.24)*.35,0)
-        UI.flightToggle:update(phase)
+        -- The Fly and direction settings reuse the original animated chrome.
     end
     if UI.launcher.Visible then UI.launcherFire:update(phase,state.burst) end
     if UI.pad.Visible then padFx:update(phase,.13) end
@@ -1171,9 +1270,9 @@ connect(RunService.RenderStepped,function(dt)
         lastPaint=phase
         local message
         if not features.fly.enabled then message="OFF"
-        elseif armed.mode=="vehicle" then message="FLYING  •  VEHICLE"
-        elseif armed.mode=="character" then message="FLYING  •  PLAYER"
-        else message="ARMED  •  WAITING" end
+        elseif armed.mode=="vehicle" then message="VEHICLE FLYING"
+        elseif armed.mode=="character" then message="PLAYER FLYING"
+        else message="ARMED" end
         if message~=lastStatus then UI.status.Text=message;lastStatus=message end
     end
 end)
