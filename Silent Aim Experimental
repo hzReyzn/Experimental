@@ -1,13 +1,15 @@
 --[[
-    REYZN X | SILENT AIM EXPERIMENTAL
+    REYZN X | TARGET DIAGNOSTICS EXPERIMENTAL V2
     Standalone / Murderers VS Sheriffs: DUELS
     Mobile-first | Amethyst / Cyan GUI | Made By Reyzn
 
-    Experimental targeting: hooks Mouse.Hit / Mouse.Target when a DUELS
-    weapon reads them. No camera rotation, no automatic shots.
-    Actual hit registration is controlled by the game/server.
+    Read-only on-screen targeting diagnostics.
+    No Mouse.Hit / Mouse.Target modifications, no metamethod hooks,
+    no remote calls, no mouse, tool or camera manipulation.
 
-    Only THIS standalone file is installed; Reyzn X is untouched.
+    For accurate results, fully restart Roblox after running any
+    older version that installed a persistent hook.
+    Only this standalone file is changed; Reyzn X remains untouched.
 ]]
 
 local Players = game:GetService("Players")
@@ -20,12 +22,21 @@ local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then return end
 
 local ENV = (type(getgenv) == "function" and getgenv()) or _G
-local SESSION_KEY = "__ReyznSilentAimExperimentalV1"
+local SESSION_KEY = "__ReyznSilentAimDiagnosticV2"
+local PRIOR_SESSION_KEY = "__ReyznSilentAimExperimentalV1"
 local HOOK_KEY = "__ReyznSilentAimExperimentalMouseHookV1"
 
-if ENV[SESSION_KEY] and type(ENV[SESSION_KEY].Destroy) == "function" then
-    pcall(function() ENV[SESSION_KEY]:Destroy() end)
+for _, key in ipairs({PRIOR_SESSION_KEY, SESSION_KEY}) do
+    local prior = ENV[key]
+    if prior and type(prior.Destroy) == "function" then
+        pcall(function() prior:Destroy() end)
+    end
 end
+-- Deactivate a previous session's hook owner if present.
+-- A permanent metamethod hook cannot be safely removed here:
+-- restart Roblox once before testing this diagnostic version.
+local priorHook = ENV[HOOK_KEY]
+if type(priorHook) == "table" then priorHook.owner = nil end
 
 local Colors = {
     black = Color3.fromRGB(8, 8, 13),
@@ -60,7 +71,7 @@ local State = {
     targetPart = "Head",
     fov = 145,
     maxDistance = 1000,
-    hookReady = false,
+    hookReady = true,
     connections = {},
     gui = nil,
     target = nil,
@@ -245,70 +256,68 @@ function State:GetTarget(requireWeapon)
     return nearest
 end
 
--- A single persistent hook, shared by re-executions.
--- Clicking OFF, closing the GUI, or replacing this script disables its effect.
-local Hook = ENV[HOOK_KEY]
-if type(Hook) ~= "table" then
-    Hook = {
-        installed = false,
-        owner = nil,
-        mouse = LocalPlayer:GetMouse()
+-- This version deliberately does not install a hook or alter shots.
+-- It observes only replicated player/team data and camera projections.
+
+local function inspectSession()
+    local info = {
+        game = LocalPlayer:GetAttribute("Game"),
+        team = LocalPlayer:GetAttribute("Team"),
+        candidates = 0,
+        onscreen = 0,
+        withinFov = 0,
+        visible = 0,
+        tool = "-",
+        weaponEvents = false
     }
-    ENV[HOOK_KEY] = Hook
-end
-Hook.owner = State
-
-if not Hook.installed and type(hookmetamethod) == "function" then
-    local oldIndex
-    local function intercept(object, key)
-        local current = Hook.owner
-        if current
-            and current.alive
-            and current.enabled
-            and object == Hook.mouse
-            and (key == "Hit" or key == "Target") then
-
-            local callerIsExecutor = false
-            if type(checkcaller) == "function" then
-                local ok, value = pcall(checkcaller)
-                callerIsExecutor = ok and value == true
-            end
-
-            if not callerIsExecutor then
-                local ok, target = pcall(
-                    current.GetTarget, current, true
-                )
-                if ok and target then
-                    if key == "Target" then
-                        return target
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if tool then
+        info.tool = tool.Name
+        info.weaponEvents =
+            tool:FindFirstChild("fire") ~= nil
+            and tool:FindFirstChild("showBeam") ~= nil
+    end
+    local camera = Workspace.CurrentCamera
+    if not camera or not info.game or info.team == nil then return info end
+    local center = Vector2.new(
+        camera.ViewportSize.X * .5, camera.ViewportSize.Y * .5
+    )
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= LocalPlayer
+            and other:GetAttribute("Game") == info.game
+            and other:GetAttribute("Team") ~= nil
+            and other:GetAttribute("Team") ~= info.team then
+            local model = other.Character
+            local hum = model and model:FindFirstChildOfClass("Humanoid")
+            local part = model and (
+                model:FindFirstChild(State.targetPart)
+                or model:FindFirstChild("UpperTorso")
+                or model:FindFirstChild("HumanoidRootPart")
+            )
+            if hum and hum.Health > 0 and part then
+                info.candidates += 1
+                local point, onScreen =
+                    camera:WorldToViewportPoint(part.Position)
+                if onScreen and point.Z > 0 then
+                    info.onscreen += 1
+                    if (Vector2.new(point.X,point.Y) - center).Magnitude
+                        <= State.fov then
+                        info.withinFov += 1
+                        if isVisible(part) then
+                            info.visible += 1
+                        end
                     end
-                    return CFrame.new(target.Position)
                 end
             end
         end
-        return oldIndex(object, key)
     end
-
-    local wrapped = intercept
-    if type(newcclosure) == "function" then
-        wrapped = newcclosure(intercept)
-    end
-
-    local ok, original = pcall(function()
-        return hookmetamethod(game, "__index", wrapped)
-    end)
-    if ok and type(original) == "function" then
-        oldIndex = original
-        Hook.installed = true
-    else
-        warn("[Reyzn Silent Aim] Could not install Mouse hook")
-    end
+    return info
 end
-State.hookReady = Hook.installed
 
 -- Standalone GUI, not parented to or dependent on Reyzn X.
 local gui = create("ScreenGui", nil, {
-    Name = "ReyznSilentAimExperimental",
+    Name = "ReyznTargetDiagnostics",
     ResetOnSpawn = false,
     IgnoreGuiInset = true,
     DisplayOrder = 9000,
@@ -331,7 +340,7 @@ local main = create("Frame", gui, {
     Name = "Main",
     AnchorPoint = Vector2.new(.5, .5),
     Position = UDim2.fromScale(.5, .5),
-    Size = UDim2.fromOffset(344, 368),
+    Size = UDim2.fromOffset(344, 442),
     BackgroundColor3 = Colors.base,
     Active = true
 })
@@ -384,7 +393,7 @@ local accentGradient = gradient(accent, {
 text(header, "REYZN  X", UDim2.fromOffset(17, 11),
     UDim2.fromOffset(218, 28), 23, Colors.silver,
     Enum.TextXAlignment.Left, true).ZIndex = 3
-text(header, "SILENT AIM  /  EXPERIMENTAL",
+text(header, "TARGET DIAGNOSTICS  /  V2",
     UDim2.fromOffset(18, 39), UDim2.fromOffset(265, 14),
     11, Colors.cyan).ZIndex = 3
 
@@ -410,10 +419,10 @@ local function card(y, height)
 end
 
 local toggleCard = card(81, 62)
-text(toggleCard, "SILENT AIM", UDim2.fromOffset(13, 8),
+text(toggleCard, "TARGET SCAN", UDim2.fromOffset(13, 8),
     UDim2.fromOffset(175, 22), 17, Colors.silver,
     Enum.TextXAlignment.Left, true).ZIndex = 3
-text(toggleCard, "Redirect Mouse.Hit / Target", UDim2.fromOffset(13, 33),
+text(toggleCard, "Read-only • shots unchanged", UDim2.fromOffset(13, 33),
     UDim2.fromOffset(190, 17), 11, Colors.muted).ZIndex = 3
 
 local toggle = button(toggleCard, "OFF",
@@ -475,8 +484,20 @@ local partButton = button(partCard, "HEAD",
     Colors.deep)
 partButton.ZIndex = 3
 
-local statusText = text(main, "STANDBY",
-    UDim2.fromOffset(18, 349), UDim2.new(1, -32, 0, 15),
+local diagCard = card(360, 56)
+local diagRound = text(diagCard, "GAME: -   |   TEAM: -",
+    UDim2.fromOffset(12, 4), UDim2.new(1, -24, 0, 16),
+    11, Colors.muted)
+local diagWeapon = text(diagCard, "TOOL: -",
+    UDim2.fromOffset(12, 20), UDim2.new(1, -24, 0, 16),
+    11, Colors.muted)
+local diagCounts = text(diagCard, "ENEMIES: 0  |  FOV: 0  |  LOS: 0",
+    UDim2.fromOffset(12, 36), UDim2.new(1, -24, 0, 15),
+    11, Colors.cyan)
+diagRound.ZIndex, diagWeapon.ZIndex, diagCounts.ZIndex = 3, 3, 3
+
+local statusText = text(main, "SCAN DISABLED",
+    UDim2.fromOffset(18, 419), UDim2.new(1, -32, 0, 18),
     11, Colors.muted)
 statusText.ZIndex = 3
 
@@ -508,6 +529,16 @@ local ring = create("Frame", gui, {
 })
 corner(ring, 9999)
 local ringStroke = stroke(ring, Colors.cyan, 1.4, .34)
+local targetMarker = create("Frame", gui, {
+    Name = "TargetMarker",
+    AnchorPoint = Vector2.new(.5, .5),
+    Size = UDim2.fromOffset(12, 12),
+    BackgroundColor3 = Colors.green,
+    Visible = false,
+    Active = false
+})
+corner(targetMarker, 20)
+stroke(targetMarker, Colors.cyan, 1.3, 0)
 
 local function updateRing()
     local camera = Workspace.CurrentCamera
@@ -537,19 +568,15 @@ local function refresh()
     wallButton.BackgroundColor3 = State.wallCheck and Colors.deep or Colors.steel
     partButton.Text = State.targetPart == "Head" and "HEAD" or "TORSO"
     ring.Visible = State.enabled
-    if not State.hookReady then
-        toggle.Text = "N/A"
-        statusText.Text = "HOOK NOT SUPPORTED BY EXECUTOR"
-        statusText.TextColor3 = Colors.red
-    elseif not State.enabled then
-        statusText.Text = "STANDBY  |  MOBILE READY"
+    if not State.enabled then
+        statusText.Text = "SCAN DISABLED  |  SHOTS UNCHANGED"
         statusText.TextColor3 = Colors.muted
+        targetMarker.Visible = false
     end
 end
 refresh()
 
 connect(toggle.MouseButton1Click, function()
-    if not State.hookReady then return end
     State.enabled = not State.enabled
     State.target = nil
     refresh()
@@ -659,7 +686,6 @@ function State:Destroy()
     if not self.alive then return end
     self.enabled = false
     self.alive = false
-    if Hook.owner == self then Hook.owner = nil end
     for _, connection in ipairs(self.connections) do
         connection:Disconnect()
     end
@@ -682,7 +708,7 @@ connect(RunService.Heartbeat, function(dt)
         panelScale.Scale = math.min(
             1,
             (camera.ViewportSize.X - 20) / 344,
-            (camera.ViewportSize.Y - 30) / 368
+            (camera.ViewportSize.Y - 30) / 442
         )
     end
 
@@ -691,30 +717,40 @@ connect(RunService.Heartbeat, function(dt)
     logoGradient.Offset = Vector2.new(math.sin(os.clock() * .7) * .35, 0)
     accentGradient.Offset = Vector2.new(math.sin(os.clock() * .8) * .22, 0)
 
-    if not State.enabled or not State.hookReady then return end
-    if not getDuelId(LocalPlayer)
-        or LocalPlayer:GetAttribute("Team") == nil then
-        statusText.Text = "WAITING FOR AN ACTIVE DUEL"
-        statusText.TextColor3 = Colors.muted
-        return
-    end
-    if not equippedDuelWeapon() then
-        statusText.Text = "EQUIP YOUR DUELS RANGED TOOL"
+    local info = inspectSession()
+    diagRound.Text = "GAME: " .. tostring(info.game or "-")
+        .. "  |  TEAM: " .. tostring(info.team or "-")
+    diagWeapon.Text = "TOOL: " .. tostring(info.tool)
+        .. (info.weaponEvents and " [DUELS EVENTS]" or "")
+    diagCounts.Text = string.format(
+        "ENEMIES: %d  |  FOV: %d  |  LOS: %d",
+        info.candidates, info.withinFov, info.visible
+    )
+
+    targetMarker.Visible = false
+    if not State.enabled then return end
+    if info.game == nil or info.team == nil then
+        statusText.Text = "WAITING FOR DUEL ATTRIBUTES"
         statusText.TextColor3 = Colors.muted
         return
     end
 
     local target = State:GetTarget(false)
     if target and target.Parent then
-        statusText.Text = "TARGET: " .. target.Parent.Name
+        statusText.Text = "VISIBLE TARGET: " .. target.Parent.Name
         statusText.TextColor3 = Colors.green
+        local point, onScreen =
+            Workspace.CurrentCamera:WorldToViewportPoint(target.Position)
+        if onScreen and point.Z > 0 then
+            targetMarker.Position =
+                UDim2.fromOffset(point.X,point.Y)
+            targetMarker.Visible = true
+        end
     else
-        statusText.Text = "NO TARGET INSIDE FOV"
+        statusText.Text = "NO VISIBLE TARGET INSIDE FOV"
         statusText.TextColor3 = Colors.muted
     end
 end)
 
-print("[Reyzn X] Silent Aim Experimental loaded")
-print(State.hookReady
-    and "[Reyzn X] Mouse hook ready (experimental)"
-    or "[Reyzn X] Mouse hook unsupported; GUI only")
+print("[Reyzn X] Target Diagnostics v2 loaded")
+print("[Reyzn X] READ ONLY: no shot hooks, mouse changes or remote calls")
