@@ -1,5 +1,5 @@
 --[[
-    REYZN X | TARGET DIAGNOSTICS EXPERIMENTAL V4
+    REYZN X | TARGET DIAGNOSTICS EXPERIMENTAL V5
     Standalone / Murderers VS Sheriffs: DUELS
     Mobile-first | Amethyst / Cyan GUI | Made By Reyzn
 
@@ -75,6 +75,11 @@ local State = {
     connections = {},
     gui = nil,
     target = nil,
+    lockedPlayer = nil,
+    lockedCharacter = nil,
+    targetLock = true,
+    prediction = true,
+    predictionSeconds = 0.18,
     minimized = false
 }
 
@@ -202,6 +207,11 @@ local function getPreviewPart(model)
     )
 end
 
+-- Reuse the raycast parameter object; one filter refresh per scan.
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
 local function isVisible(part)
     if not State.wallCheck then return true end
     local camera = Workspace.CurrentCamera
@@ -211,25 +221,25 @@ local function isVisible(part)
     local difference = part.Position - origin
     if difference.Magnitude < 0.01 then return true end
 
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    if LocalPlayer.Character then
-        params.FilterDescendantsInstances = {LocalPlayer.Character}
-    end
-    params.IgnoreWater = true
-
-    local hit = Workspace:Raycast(origin, difference, params)
+    local hit = Workspace:Raycast(origin, difference, rayParams)
     return hit == nil or (
         part.Parent ~= nil
         and hit.Instance:IsDescendantOf(part.Parent)
     )
 end
 
+local function clearLock()
+    State.lockedPlayer = nil
+    State.lockedCharacter = nil
+    State.target = nil
+end
+
 local function previewScan()
+    local players = Players:GetPlayers()
     local info = {
         game = getDuelId(LocalPlayer),
         team = getTeam(LocalPlayer),
-        onlinePlayers = math.max(0, #Players:GetPlayers() - 1),
+        onlinePlayers = math.max(0, #players - 1),
         aliveCharacters = 0,
         candidates = 0,
         onscreen = 0,
@@ -253,8 +263,12 @@ local function previewScan()
         camera.ViewportSize.Y * .5
     )
     local nearestPixels = State.fov
+    local closestCandidate = nil
+    local previousCandidate = nil
+    rayParams.FilterDescendantsInstances =
+        LocalPlayer.Character and {LocalPlayer.Character} or {}
 
-    for _, other in ipairs(Players:GetPlayers()) do
+    for _, other in ipairs(players) do
         if other ~= LocalPlayer then
             local model = other.Character
             local hum = model and model:FindFirstChildOfClass("Humanoid")
@@ -275,10 +289,20 @@ local function previewScan()
                             info.withinFov += 1
                             if isVisible(part) then
                                 info.visible += 1
+                                local candidate = {
+                                    player = other,
+                                    model = model,
+                                    part = part,
+                                    name = other.DisplayName
+                                }
                                 if pixels < nearestPixels then
                                     nearestPixels = pixels
-                                    info.selectedPart = part
-                                    info.selectedName = other.DisplayName
+                                    closestCandidate = candidate
+                                end
+                                if State.targetLock
+                                    and other == State.lockedPlayer
+                                    and model == State.lockedCharacter then
+                                    previousCandidate = candidate
                                 end
                             end
                         end
@@ -288,6 +312,21 @@ local function previewScan()
                 end
             end
         end
+    end
+
+    local selected = previousCandidate or closestCandidate
+    if selected then
+        info.selectedPart = selected.part
+        info.selectedName = selected.name
+        if State.targetLock and State.enabled then
+            State.lockedPlayer = selected.player
+            State.lockedCharacter = selected.model
+        else
+            State.lockedPlayer = nil
+            State.lockedCharacter = nil
+        end
+    else
+        clearLock()
     end
 
     return info
@@ -329,7 +368,7 @@ local main = create("Frame", gui, {
     Name = "Main",
     AnchorPoint = Vector2.new(.5, .5),
     Position = UDim2.fromScale(.5, .5),
-    Size = UDim2.fromOffset(344, 442),
+    Size = UDim2.fromOffset(344, 506),
     BackgroundColor3 = Colors.base,
     Active = true
 })
@@ -382,7 +421,7 @@ local accentGradient = gradient(accent, {
 text(header, "REYZN  X", UDim2.fromOffset(17, 11),
     UDim2.fromOffset(218, 28), 23, Colors.silver,
     Enum.TextXAlignment.Left, true).ZIndex = 3
-text(header, "TARGET DIAGNOSTICS  /  V4",
+text(header, "TARGET DIAGNOSTICS  /  V5",
     UDim2.fromOffset(18, 39), UDim2.fromOffset(265, 14),
     11, Colors.cyan).ZIndex = 3
 
@@ -473,7 +512,22 @@ local partButton = button(partCard, "HEAD",
     Colors.deep)
 partButton.ZIndex = 3
 
-local diagCard = card(360, 56)
+-- Independent mobile-friendly controls for sticky player selection and
+-- predictive VISUAL preview. Neither feature touches shots or aim.
+local trackingCard = card(360, 52)
+text(trackingCard, "TARGET LOCK", UDim2.fromOffset(12, 6),
+    UDim2.fromOffset(130, 19), 13, Colors.silver).ZIndex = 3
+text(trackingCard, "PREDICTION", UDim2.fromOffset(169, 6),
+    UDim2.fromOffset(112, 19), 13, Colors.silver).ZIndex = 3
+local lockButton = button(trackingCard, "ON",
+    UDim2.fromOffset(100, 27), UDim2.fromOffset(53, 21),
+    Colors.deep)
+local predictionButton = button(trackingCard, "ON",
+    UDim2.fromOffset(248, 27), UDim2.fromOffset(53, 21),
+    Colors.deep)
+lockButton.ZIndex, predictionButton.ZIndex = 3, 3
+
+local diagCard = card(422, 56)
 local diagRound = text(diagCard, "GAME: -   |   TEAM: -",
     UDim2.fromOffset(12, 4), UDim2.new(1, -24, 0, 16),
     11, Colors.muted)
@@ -486,7 +540,7 @@ local diagCounts = text(diagCard, "SCAN: 0  |  FOV: 0  |  LOS: 0",
 diagRound.ZIndex, diagWeapon.ZIndex, diagCounts.ZIndex = 3, 3, 3
 
 local statusText = text(main, "SCAN DISABLED",
-    UDim2.fromOffset(18, 419), UDim2.new(1, -32, 0, 18),
+    UDim2.fromOffset(18, 484), UDim2.new(1, -32, 0, 18),
     11, Colors.muted)
 statusText.ZIndex = 3
 
@@ -526,8 +580,39 @@ local targetMarker = create("Frame", gui, {
     Visible = false,
     Active = false
 })
+targetMarker.ZIndex = 4
 corner(targetMarker, 20)
 stroke(targetMarker, Colors.cyan, 1.3, 0)
+
+-- The violet/pink dot is a display-only extrapolation of player motion.
+-- It never moves the camera, mouse, weapons or network events.
+local predictionLine = create("Frame", gui, {
+    Name = "PredictionGuide",
+    AnchorPoint = Vector2.new(.5, .5),
+    BackgroundColor3 = Colors.pink,
+    BackgroundTransparency = .58,
+    Size = UDim2.fromOffset(0, 2),
+    Visible = false,
+    Active = false,
+    ZIndex = 2
+})
+corner(predictionLine, 2)
+local predictionMarker = create("Frame", gui, {
+    Name = "PredictionMarker",
+    AnchorPoint = Vector2.new(.5, .5),
+    Size = UDim2.fromOffset(9, 9),
+    BackgroundColor3 = Colors.pink,
+    Visible = false,
+    Active = false,
+    ZIndex = 5
+})
+corner(predictionMarker, 20)
+stroke(predictionMarker, Colors.violet, 1.3, .06)
+
+local function hidePrediction()
+    predictionLine.Visible = false
+    predictionMarker.Visible = false
+end
 
 local function updateRing()
     local camera = Workspace.CurrentCamera
@@ -556,18 +641,25 @@ local function refresh()
     wallButton.Text = State.wallCheck and "ON" or "OFF"
     wallButton.BackgroundColor3 = State.wallCheck and Colors.deep or Colors.steel
     partButton.Text = State.targetPart == "Head" and "HEAD" or "TORSO"
+    lockButton.Text = State.targetLock and "ON" or "OFF"
+    lockButton.BackgroundColor3 =
+        State.targetLock and Colors.deep or Colors.steel
+    predictionButton.Text = State.prediction and "ON" or "OFF"
+    predictionButton.BackgroundColor3 =
+        State.prediction and Colors.deep or Colors.steel
     ring.Visible = State.enabled
     if not State.enabled then
         statusText.Text = "SCAN DISABLED  |  SHOTS UNCHANGED"
         statusText.TextColor3 = Colors.muted
         targetMarker.Visible = false
+        hidePrediction()
     end
 end
 refresh()
 
 connect(toggle.MouseButton1Click, function()
     State.enabled = not State.enabled
-    State.target = nil
+    clearLock()
     refresh()
 end)
 connect(wallButton.MouseButton1Click, function()
@@ -577,7 +669,29 @@ end)
 connect(partButton.MouseButton1Click, function()
     State.targetPart = State.targetPart == "Head"
         and "UpperTorso" or "Head"
+    clearLock()
     refresh()
+end)
+connect(lockButton.MouseButton1Click, function()
+    State.targetLock = not State.targetLock
+    clearLock()
+    refresh()
+end)
+connect(predictionButton.MouseButton1Click, function()
+    State.prediction = not State.prediction
+    if not State.prediction then hidePrediction() end
+    refresh()
+end)
+
+-- New round, changed team, respawn, or departed player:
+-- discard the previous model so a stale target is never retained.
+connect(LocalPlayer.CharacterAdded, function()
+    clearLock()
+end)
+connect(LocalPlayer:GetAttributeChangedSignal("Game"), clearLock)
+connect(LocalPlayer:GetAttributeChangedSignal("Team"), clearLock)
+connect(Players.PlayerRemoving, function(other)
+    if other == State.lockedPlayer then clearLock() end
 end)
 
 -- Touch- and mouse-friendly slider.
@@ -589,6 +703,7 @@ local function sliderSet(x)
         0, 1
     )
     State.fov = math.floor(40 + fraction * 280 + .5)
+    -- FOV changes are validated during the next lightweight scan.
     updateFov()
 end
 connect(track.InputBegan, function(input)
@@ -680,6 +795,8 @@ function State:Destroy()
     end
     table.clear(self.connections)
     self.target = nil
+    self.lockedPlayer = nil
+    self.lockedCharacter = nil
     if self.gui then self.gui:Destroy() end
     if ENV[SESSION_KEY] == self then ENV[SESSION_KEY] = nil end
 end
@@ -701,23 +818,67 @@ connect(RunService.RenderStepped, function()
     local part = State.enabled and State.target or nil
     if not part or not part.Parent then
         targetMarker.Visible = false
+        hidePrediction()
         return
     end
 
     local hum = part.Parent:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then
         targetMarker.Visible = false
+        hidePrediction()
+        clearLock()
         return
     end
 
     local point, onScreen = camera:WorldToViewportPoint(part.Position)
     if not onScreen or point.Z <= 0 then
         targetMarker.Visible = false
+        hidePrediction()
         return
     end
 
     targetMarker.Position = UDim2.fromOffset(point.X, point.Y)
     targetMarker.Visible = true
+
+    if not State.prediction then
+        hidePrediction()
+        return
+    end
+
+    local root = part.Parent:FindFirstChild("HumanoidRootPart")
+    if not root then
+        hidePrediction()
+        return
+    end
+
+    -- Short capped linear extrapolation. This is an estimate, not
+    -- validated hit prediction or a replacement for manual aiming.
+    local velocity = root.AssemblyLinearVelocity
+    local speed = velocity.Magnitude
+    if speed > 95 then velocity = velocity.Unit * 95 end
+
+    local futureWorld = part.Position + velocity * State.predictionSeconds
+    local future, futureVisible = camera:WorldToViewportPoint(futureWorld)
+    if not futureVisible or future.Z <= 0 then
+        hidePrediction()
+        return
+    end
+
+    local current2D = Vector2.new(point.X, point.Y)
+    local future2D = Vector2.new(future.X, future.Y)
+    local offset = future2D - current2D
+    predictionMarker.Position = UDim2.fromOffset(future.X, future.Y)
+    predictionMarker.Visible = true
+
+    if offset.Magnitude > 4 then
+        local middle = (current2D + future2D) * .5
+        predictionLine.Position = UDim2.fromOffset(middle.X, middle.Y)
+        predictionLine.Size = UDim2.fromOffset(offset.Magnitude, 2)
+        predictionLine.Rotation = math.deg(math.atan2(offset.Y, offset.X))
+        predictionLine.Visible = true
+    else
+        predictionLine.Visible = false
+    end
 end)
 
 -- Diagnostic counts and target selection remain throttled for mobile.
@@ -732,7 +893,7 @@ connect(RunService.Heartbeat, function(dt)
         panelScale.Scale = math.min(
             1,
             (camera.ViewportSize.X - 20) / 344,
-            (camera.ViewportSize.Y - 30) / 442
+            (camera.ViewportSize.Y - 30) / 506
         )
     end
 
@@ -740,6 +901,7 @@ connect(RunService.Heartbeat, function(dt)
     logoGradient.Offset = Vector2.new(math.sin(os.clock() * .7) * .35, 0)
     accentGradient.Offset = Vector2.new(math.sin(os.clock() * .8) * .22, 0)
 
+    -- No extra scans are performed in the render loop.
     local info = inspectSession()
     diagRound.Text = "GAME: " .. tostring(info.game or "UNKNOWN")
         .. "  |  TEAM: " .. tostring(info.team or "UNKNOWN")
@@ -754,7 +916,7 @@ connect(RunService.Heartbeat, function(dt)
     if not State.enabled then return end
 
     if info.selectedPart and info.selectedPart.Parent then
-        statusText.Text = "VISIBLE PLAYER: "
+        statusText.Text = (State.targetLock and "LOCKED: " or "VISIBLE: ")
             .. tostring(info.selectedName or info.selectedPart.Parent.Name)
         statusText.TextColor3 = Colors.green
     elseif info.onlinePlayers == 0 then
@@ -781,5 +943,5 @@ connect(RunService.Heartbeat, function(dt)
     end
 end)
 
-print("[Reyzn X] Player Diagnostics v4 loaded (render-synced marker)")
+print("[Reyzn X] Target Diagnostics v5 loaded (lock + visual prediction)")
 print("[Reyzn X] READ ONLY: preview only; no shot hooks or remote calls")
