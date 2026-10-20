@@ -971,7 +971,8 @@ local function processNearbyFloors()
     local processed=0
     while processed<partsPerFrame and scanIndex<=#scanQueue do
         local part=scanQueue[scanIndex]
-        scanQueue[scanIndex]=nil
+        -- Keep the dense queue intact until the scan finishes. Removing
+        -- elements here makes Lua's # operator unreliable for the loop.
         scanIndex+=1
         processed+=1
         if part and part.Parent then
