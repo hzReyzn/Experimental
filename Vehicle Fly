@@ -1,4 +1,4 @@
--- REYZN VEHICLE FLY 1.1 | COMPACT AMETHYST EDITION
+-- REYZN VEHICLE FLY 1.2 | COMPACT AMETHYST EDITION
 -- Standalone vehicle flight interface, based on authentic Reyzn X styling.
 -- Changes only hzReyzn/Experimental/Vehicle Fly, never Ghislain.
 -- Joystick / WASD: horizontal steering. E/Q or touch UP/DOWN: altitude.
@@ -305,7 +305,7 @@ end
 -- Standalone ScreenGui and animation scopes
 UI.gui=make("ScreenGui",playerGui,{Name="ReyznVehicleFly",ResetOnSpawn=false,DisplayOrder=67,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,IgnoreGuiInset=false})
 pcall(function() UI.gui.ScreenInsets=Enum.ScreenInsets.CoreUISafeInsets end)
-UI.gui:SetAttribute("Version","1.1")
+UI.gui:SetAttribute("Version","1.2")
 UI.gui:SetAttribute("Design","Reyzn X | Amethyst Edition")
 UI.gui:SetAttribute("FlightEnabled",false)
 UI.windowFade=make("NumberValue",UI.gui,{Name="WindowOpacity",Value=1})
@@ -650,7 +650,7 @@ end
 
 
 -- Independent vehicle-flight state. ON means armed, even when not seated.
-local armed={seat=nil,root=nil,attachment=nil,velocity=nil,orientation=nil}
+local armed={mode=nil,seat=nil,root=nil,humanoid=nil,originalAutoRotate=nil,attachment=nil,velocity=nil,orientation=nil}
 local speed=95
 local heldTouch={}
 local heldKeys={}
@@ -662,10 +662,16 @@ local alive=true
 
 local function removePhysics()
     local oldVelocity,oldOrientation,oldAttachment=armed.velocity,armed.orientation,armed.attachment
-    armed.seat,armed.root,armed.attachment,armed.velocity,armed.orientation=nil,nil,nil,nil,nil
+    local oldHumanoid,oldAutoRotate=armed.humanoid,armed.originalAutoRotate
+    armed.mode,armed.seat,armed.root,armed.humanoid,armed.originalAutoRotate=nil,nil,nil,nil,nil
+    armed.attachment,armed.velocity,armed.orientation=nil,nil,nil
     if oldVelocity then oldVelocity:Destroy() end
     if oldOrientation then oldOrientation:Destroy() end
     if oldAttachment then oldAttachment:Destroy() end
+    -- Restore normal character rotation when flight ends or transfers to a vehicle.
+    if oldHumanoid and oldHumanoid.Parent and oldAutoRotate~=nil then
+        oldHumanoid.AutoRotate=oldAutoRotate
+    end
     table.clear(heldTouch)
     if UI.pad then UI.pad.Visible=false end
 end
@@ -719,10 +725,67 @@ local function attachVehicle(seat,root)
     orientation.RigidityEnabled=false
     orientation.CFrame=root.CFrame.Rotation
     orientation.Parent=root
+    armed.mode="vehicle"
     armed.seat,armed.root=seat,root
     armed.attachment,armed.velocity,armed.orientation=attach,linear,orientation
     if UI.pad then UI.pad.Visible=Input.TouchEnabled end
     state.burst=1
+end
+
+-- Walking is a valid flight target too. The same UP/DOWN, joystick and WASD
+-- controls operate the character until they sit in a vehicle.
+local function attachCharacter(humanoid,root)
+    removePhysics()
+    if not root or not root.Parent or not humanoid or humanoid.Health<=0 then return end
+
+    local attachment=Instance.new("Attachment")
+    attachment.Name="ReyznCharacterFly_Attachment"
+    attachment.Parent=root
+
+    local linear=Instance.new("LinearVelocity")
+    linear.Name="ReyznCharacterFly_Velocity"
+    linear.Attachment0=attachment
+    linear.RelativeTo=Enum.ActuatorRelativeTo.World
+    linear.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector
+    pcall(function()linear.ForceLimitsEnabled=false end)
+    linear.MaxForce=math.huge
+    linear.VectorVelocity=Vector3.zero
+    linear.Parent=root
+
+    local orientation=Instance.new("AlignOrientation")
+    orientation.Name="ReyznCharacterFly_Orientation"
+    orientation.Mode=Enum.OrientationAlignmentMode.OneAttachment
+    orientation.Attachment0=attachment
+    orientation.MaxTorque=math.huge
+    orientation.Responsiveness=16
+    orientation.RigidityEnabled=false
+    orientation.CFrame=root.CFrame.Rotation
+    orientation.Parent=root
+
+    armed.mode="character"
+    armed.root=root
+    armed.humanoid=humanoid
+    armed.originalAutoRotate=humanoid.AutoRotate
+    armed.attachment,armed.velocity,armed.orientation=attachment,linear,orientation
+    humanoid.AutoRotate=false
+    -- Freefall preserves the native thumbstick/keyboard inputs and allows
+    -- touching seats, unlike PlatformStand which can block seating.
+    if not humanoid.Sit then
+        pcall(function() humanoid:ChangeState(Enum.HumanoidStateType.Freefall) end)
+    end
+    if UI.pad then UI.pad.Visible=Input.TouchEnabled end
+    state.burst=1
+end
+
+local function walkingCharacter()
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    local root=character and character:FindFirstChild("HumanoidRootPart")
+    if humanoid and humanoid.Health>0 and root and root:IsA("BasePart")
+        and not root.Anchored and not humanoid.SeatPart then
+        return humanoid,root
+    end
+    return nil,nil
 end
 
 features.fly={enabled=false}
@@ -901,25 +964,49 @@ connect(RunService.Heartbeat,function()
         if armed.root then removePhysics() end
         return
     end
-    local seat,root=seatedVehicle()
-    if not seat then
-        if armed.root then removePhysics() end
-        return -- remain ARMED for the next seat
+
+    -- Vehicle wins while seated; otherwise fly the player.
+    local seat,vehicleRoot=seatedVehicle()
+    local targetMode,targetRoot,targetHumanoid
+    if seat then
+        targetMode,targetRoot="vehicle",vehicleRoot
+    else
+        targetHumanoid,targetRoot=walkingCharacter()
+        if targetHumanoid then
+            targetMode="character"
+        end
     end
-    if armed.seat~=seat or armed.root~=root or not armed.velocity or not armed.velocity.Parent then
-        attachVehicle(seat,root)
+
+    if not targetRoot then
+        if armed.root then removePhysics() end
+        return -- ON stays selected across sitting, leaving and respawning
+    end
+
+    if armed.mode~=targetMode or armed.root~=targetRoot
+        or (targetMode=="vehicle" and armed.seat~=seat)
+        or (targetMode=="character" and armed.humanoid~=targetHumanoid)
+        or not armed.velocity or not armed.velocity.Parent then
+        if targetMode=="vehicle" then
+            attachVehicle(seat,targetRoot)
+        else
+            attachCharacter(targetHumanoid,targetRoot)
+        end
     end
     if not armed.velocity then return end
+
     local camera=workspace.CurrentCamera
-    local look=camera and camera.CFrame.LookVector or root.CFrame.LookVector
-    local right=camera and camera.CFrame.RightVector or root.CFrame.RightVector
+    local look=camera and camera.CFrame.LookVector or targetRoot.CFrame.LookVector
+    local right=camera and camera.CFrame.RightVector or targetRoot.CFrame.RightVector
     local forward=Vector3.new(look.X,0,look.Z)
-    if forward.Magnitude<.001 then forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z) end
+    if forward.Magnitude<.001 then
+        forward=Vector3.new(targetRoot.CFrame.LookVector.X,0,targetRoot.CFrame.LookVector.Z)
+    end
     if forward.Magnitude<.001 then forward=Vector3.new(0,0,-1) end
     forward=forward.Unit
     local side=Vector3.new(right.X,0,right.Z)
     if side.Magnitude<.001 then side=Vector3.new(-forward.Z,0,forward.X) end
     side=side.Unit
+
     local x,z=horizontalInput()
     local altitude=(keyHeld("up") and 1 or 0)-(keyHeld("down") and 1 or 0)
     local direction=side*x+forward*z+Vector3.new(0,altitude,0)
@@ -937,7 +1024,9 @@ local function adjustLayout(initial)
         local camera=workspace.CurrentCamera
         vp=camera and camera.ViewportSize or Vector2.new(900,560)
     end
-    local factor=math.min(1,math.max(.70,(vp.X-20)/348),math.max(.70,(vp.Y-30)/238))
+    -- Keep the original precise button layout but render it ~12% smaller.
+    local available=math.min(1,(vp.X-20)/348,(vp.Y-30)/238)
+    local factor=math.max(.55,available)*.88
     UI.scale.Scale=factor
     UI.window.Size=UDim2.fromOffset(348,238)
     UI.panel.Size=UDim2.fromOffset(348,238)
@@ -1082,8 +1171,9 @@ connect(RunService.RenderStepped,function(dt)
         lastPaint=phase
         local message
         if not features.fly.enabled then message="OFF"
-        elseif armed.root then message="FLYING"
-        else message="ARMED  •  WAITING FOR VEHICLE" end
+        elseif armed.mode=="vehicle" then message="FLYING  •  VEHICLE"
+        elseif armed.mode=="character" then message="FLYING  •  PLAYER"
+        else message="ARMED  •  WAITING" end
         if message~=lastStatus then UI.status.Text=message;lastStatus=message end
     end
 end)
