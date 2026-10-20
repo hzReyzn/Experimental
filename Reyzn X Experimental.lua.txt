@@ -3273,6 +3273,240 @@ end
 end)()
 -- END CHARACTER FEATURES
 
+-- EXPERIMENTAL MAIN: Anti-Void & Anti-Tsunami V3 (both OFF by default).
+local function nDSController(controller,name)
+    local originalSet=controller.setEnabled
+    function controller:setEnabled(value)
+        if value and game.PlaceId~=189707 then
+            warn("Reyzn X: "..name.." requires Natural Disaster Survival.")
+            return false
+        end
+        return originalSet(self,value)
+    end
+    return controller
+end
+
+local function createAntiVoid(context)
+    local locations={
+        {name="Island",pos=Vector3.new(-127.3518295288086,47.61382293701172,8.868382453918457)},
+        {name="Tower",pos=Vector3.new(-236.30526733398438,194.6138153076172,337.5936584472656)}
+    }
+    local elapsed=0
+    local lastRescue=-math.huge
+    local spawnAt=os.clock()
+    local rp=RaycastParams.new()
+    rp.FilterType=Enum.RaycastFilterType.Exclude
+    rp.IgnoreWater=true
+    rp.RespectCanCollide=true
+    local controller=context.newFeature(context.player,context.runService,{
+        start=function()
+            local env=(type(getgenv)=="function" and getgenv()) or _G
+            if typeof(env.ReyznAntiVoidConnection)=="RBXScriptConnection" then
+                env.ReyznAntiVoidConnection:Disconnect()
+                env.ReyznAntiVoidConnection=nil
+            end
+        end,
+        reset=function()
+            elapsed=0
+            spawnAt=os.clock()
+        end,
+        step=function(self,dt)
+            elapsed+=dt
+            if elapsed<.1 then return end
+            elapsed=0
+            local char,root,hum=self.character,self.root,self.humanoid
+            if not root or root.Anchored or hum.SeatPart then return end
+            local now=os.clock()
+            if now-spawnAt<2 or now-lastRescue<2 then return end
+            if root.Position.Y>math.max(18,workspace.FallenPartsDestroyHeight+35) then return end
+            if root.AssemblyLinearVelocity.Y>-12 then return end
+            rp.FilterDescendantsInstances={char}
+            if workspace:Raycast(root.Position,Vector3.new(0,-400,0),rp) then return end
+            local choice,shortest
+            for _,destination in ipairs(locations) do
+                local offset=destination.pos-root.Position
+                local length=offset.X*offset.X+offset.Z*offset.Z
+                if not shortest or length<shortest then
+                    shortest=length;choice=destination
+                end
+            end
+            if not choice then return end
+            lastRescue=now
+            context.motion:writeVelocity(root,Vector3.zero)
+            root.AssemblyAngularVelocity=Vector3.zero
+            root.CFrame=CFrame.new(choice.pos)*root.CFrame.Rotation
+            context.motion:markCarry(root)
+            warn("Reyzn X Anti-Void: rescue to "..choice.name)
+        end
+    })
+    return nDSController(controller,"Anti-Void")
+end
+
+local function createAntiTsunami(context)
+    -- Values verified in the standalone V3 test.
+    local RADIUS,DURATION,RATE=10,8,.1
+    local RISE_SPEED,FALL_SPEED=50,50
+    local elapsed=0
+    local phase="idle"
+    local trackedWave,previousCenter,previousTime,usedWave
+    local lockedPosition,hoverHeight,landPosition,detectAt
+    local attachment,align
+    local function clearForce()
+        if align then align:Destroy();align=nil end
+        if attachment then attachment:Destroy();attachment=nil end
+    end
+    local function resetFloat(keepWave)
+        clearForce()
+        phase="idle"
+        lockedPosition,hoverHeight,landPosition,detectAt=nil,nil,nil,nil
+        if not keepWave then usedWave=nil end
+    end
+    local function findWave()
+        local structure=workspace:FindFirstChild("Structure")
+        return structure and structure:FindFirstChild("TsunamiWave",true)
+    end
+    local function inspectWave(position,wave)
+        local closest,highest=math.huge,-math.huge
+        local sum,count=Vector3.zero,0
+        local function scan(part)
+            local cf,half=part.CFrame,part.Size*.5
+            local r,u,l=cf.RightVector,cf.UpVector,cf.LookVector
+            local ex=math.abs(r.X)*half.X+math.abs(u.X)*half.Y+math.abs(l.X)*half.Z
+            local ey=math.abs(r.Y)*half.X+math.abs(u.Y)*half.Y+math.abs(l.Y)*half.Z
+            local ez=math.abs(r.Z)*half.X+math.abs(u.Z)*half.Y+math.abs(l.Z)*half.Z
+            local pos=part.Position
+            local dx=math.max(math.abs(position.X-pos.X)-ex,0)
+            local dz=math.max(math.abs(position.Z-pos.Z)-ez,0)
+            closest=math.min(closest,math.sqrt(dx*dx+dz*dz))
+            highest=math.max(highest,pos.Y+ey)
+            sum+=pos;count+=1
+        end
+        if wave:IsA("BasePart") then scan(wave)
+        else
+            for _,part in ipairs(wave:GetDescendants()) do
+                if part:IsA("BasePart") then scan(part) end
+            end
+        end
+        if count==0 then return math.huge,-math.huge,nil end
+        return closest,highest,sum/count
+    end
+    local function movingCloser(wave,center,ref,now)
+        if not wave or not center then
+            trackedWave,previousCenter,previousTime=nil,nil,nil
+            return false
+        end
+        if trackedWave~=wave then
+            trackedWave,previousCenter,previousTime=wave,center,now
+            return false
+        end
+        local approach=false
+        if previousCenter and previousTime then
+            local dt=math.max(now-previousTime,.001)
+            local delta=Vector3.new(center.X-previousCenter.X,0,center.Z-previousCenter.Z)
+            local radial=Vector3.new(center.X-ref.X,0,center.Z-ref.Z)
+            if radial.Magnitude>1 then
+                approach=delta:Dot(radial.Unit)/dt < -1.5
+            end
+        end
+        previousCenter,previousTime=center,now
+        return approach
+    end
+    local function startFloat(root,wave,waveTop,now)
+        lockedPosition=root.Position
+        local rise=math.clamp(math.max(55,waveTop+20-lockedPosition.Y),55,140)
+        hoverHeight=lockedPosition.Y+rise
+        detectAt=now
+        usedWave=wave
+        root.AssemblyLinearVelocity=Vector3.zero
+        root.AssemblyAngularVelocity=Vector3.zero
+        clearForce()
+        attachment=Instance.new("Attachment")
+        attachment.Name="ReyznTsunamiAttachment"
+        attachment.Parent=root
+        align=Instance.new("AlignPosition")
+        align.Name="ReyznTsunamiFloat"
+        align.Mode=Enum.PositionAlignmentMode.OneAttachment
+        align.Attachment0=attachment
+        align.ApplyAtCenterOfMass=true
+        align.MaxForce=1000000
+        align.MaxVelocity=RISE_SPEED
+        align.Responsiveness=40
+        align.RigidityEnabled=false
+        align.Position=Vector3.new(lockedPosition.X,hoverHeight,lockedPosition.Z)
+        align.Parent=root
+        phase="floating"
+    end
+    local function safeLanding(character,humanoid,root,wave)
+        local exclusions={character}
+        if wave then exclusions[#exclusions+1]=wave end
+        local params=RaycastParams.new()
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances=exclusions
+        params.IgnoreWater=true
+        params.RespectCanCollide=true
+        local ray=workspace:Raycast(
+            Vector3.new(lockedPosition.X,root.Position.Y,lockedPosition.Z),
+            Vector3.new(0,-500,0),params
+        )
+        if not ray or ray.Normal.Y<.65 then return nil end
+        local y=ray.Position.Y+humanoid.HipHeight+root.Size.Y*.5+.3
+        if y<workspace.FallenPartsDestroyHeight+15 then return nil end
+        return Vector3.new(lockedPosition.X,y,lockedPosition.Z)
+    end
+    local controller=context.newFeature(context.player,context.runService,{
+        start=function()
+            local env=(type(getgenv)=="function" and getgenv()) or _G
+            if type(env.ReyznTsunamiFloatStop)=="function" then
+                pcall(env.ReyznTsunamiFloatStop)
+            end
+        end,
+        reset=function()
+            elapsed=0
+            resetFloat(false)
+            trackedWave,previousCenter,previousTime=nil,nil,nil
+        end,
+        step=function(self,dt)
+            elapsed+=dt
+            if elapsed<RATE then return end
+            elapsed=0
+            local char,root,hum=self.character,self.root,self.humanoid
+            if root.Anchored or hum.SeatPart then resetFloat(false);return end
+            local now=os.clock()
+            local wave=findWave()
+            if not wave then usedWave=nil end
+            local distance,top,center=math.huge,-math.huge,nil
+            if wave then distance,top,center=inspectWave(root.Position,wave) end
+            local approaching=movingCloser(wave,center,lockedPosition or root.Position,now)
+            if phase=="idle" then
+                if wave and wave~=usedWave and distance<=RADIUS and approaching then
+                    startFloat(root,wave,top,now)
+                end
+                return
+            end
+            if not align or not lockedPosition then resetFloat(false);return end
+            if phase=="floating" then
+                -- Descend 8 seconds after first detection, not after wave departure.
+                if now-detectAt<DURATION then return end
+                local destination=safeLanding(char,hum,root,wave)
+                if not destination then return end
+                landPosition=destination
+                phase="descending"
+                align.MaxVelocity=FALL_SPEED
+                align.Position=destination
+                return
+            end
+            if phase=="descending" and landPosition then
+                if (root.Position-landPosition).Magnitude<=2.5 then
+                    root.AssemblyLinearVelocity=Vector3.zero
+                    resetFloat(true)
+                end
+            end
+        end
+    })
+    return nDSController(controller,"Anti-Tsunami")
+end
+-- END EXPERIMENTAL MAIN FEATURES
+
 -- Main executable integration.
 UI.mainColumns=frame(pages.Main,"MainColumns",UDim2.fromOffset(0,0),UDim2.fromOffset(600,120),nil,1)
 UI.mainLeft=frame(UI.mainColumns,"ToggleOptions",UDim2.fromOffset(0,0),UDim2.fromOffset(288,120),nil,1)
@@ -3296,6 +3530,8 @@ function motion:clearCarry(root) if self.carriedRoot==root then self.carriedRoot
 local featureContext={player=player,players=Players,runService=RunService,newFeature=createCharacterFeature,motion=motion}
 features.walkOnWater=createWalkOnWater(featureContext)
 features.antifling=createAntifling(featureContext)
+features.antiTsunami=createAntiTsunami(featureContext)
+features.antiVoid=createAntiVoid(featureContext)
 features.disasterPrediction=createDisasterPrediction({player=player,playerGui=playerGui,gui=UI.gui,
     storage=game:GetService("ReplicatedStorage"),runService=RunService,detection=DisasterDetection,
     notify=function(kind,text)UI.disasterToast:show(kind,text)end,
@@ -3304,7 +3540,9 @@ UI.noFallToggle=FeatureToggle.new(UI.mainLeft,"NoFallDamage","No Fall Damage",fe
 UI.waterToggle=FeatureToggle.new(UI.mainLeft,"WalkOnWater","Walk on Water",features.walkOnWater)
 UI.antiflingToggle=FeatureToggle.new(UI.mainLeft,"Antifling","Antifling",features.antifling)
 UI.disasterToggle=FeatureToggle.new(UI.mainLeft,"DisasterPrediction","Disaster Prediction",features.disasterPrediction)
-UI.featureToggles={UI.noFallToggle,UI.waterToggle,UI.antiflingToggle,UI.disasterToggle}
+UI.tsunamiToggle=FeatureToggle.new(UI.mainLeft,"AntiTsunami","Anti-Tsunami",features.antiTsunami)
+UI.voidToggle=FeatureToggle.new(UI.mainLeft,"AntiVoid","Anti-Void",features.antiVoid)
+UI.featureToggles={UI.noFallToggle,UI.waterToggle,UI.antiflingToggle,UI.disasterToggle,UI.tsunamiToggle,UI.voidToggle}
 UI.disasterManual,UI.disasterManualFX=button(UI.mainLeft,"DisasterPredictionManual",UDim2.fromOffset(5,294),UDim2.fromOffset(272,52))
 UI.disasterManual.Active=true
 UI.disasterManualCaption=label(UI.disasterManual,"ManualCaption","Predict Disaster",UDim2.fromOffset(12,0),UDim2.new(1,-54,1,0),20,C.white,OPTION_FONT)
