@@ -651,12 +651,13 @@ end
 
 -- Independent vehicle-flight state. ON means armed, even when not seated.
 local armed={mode=nil,seat=nil,root=nil,humanoid=nil,originalAutoRotate=nil,attachment=nil,velocity=nil,orientation=nil}
-local speed=95
+local speed=50
 local heldTouch={}
 local heldKeys={}
 local activeMoveControls=nil
 local minimized=false
 local dragging=nil
+local altitudePadMoved=false
 local lastStatus=""
 local alive=true
 
@@ -804,7 +805,7 @@ end
 
 -- Adapted Vfly-style arrangement, using original Reyzn X Amethyst button/surface/VFX systems.
 -- The UI has two compact columns: speed/fly, and three flight-direction options.
-local flightDirection={lookUpDown=true,lockDirection=false,yawOffset=0,lockedLook=nil,lockedRight=nil}
+local flightDirection={lookUpDown=true,lockDirection=false,yawOffset=0,lockedOrientation=nil}
 local optionPanelOpen=true
 
 UI.panel,UI.panelFx=surface(UI.window,"AmethystPanel",UDim2.fromOffset(0,0),UDim2.fromOffset(496,238),"window")
@@ -891,18 +892,31 @@ end)
 connect(UI.lockButton.Activated,function()
     flightDirection.lockDirection=not flightDirection.lockDirection
     if flightDirection.lockDirection then
-        local camera=workspace.CurrentCamera
-        flightDirection.lockedLook=camera and camera.CFrame.LookVector or Vector3.new(0,0,-1)
-        flightDirection.lockedRight=camera and camera.CFrame.RightVector or Vector3.new(1,0,0)
+        -- Freeze the object's actual 3D rotation while movement remains free.
+        flightDirection.lockedOrientation=armed.root and armed.root.CFrame.Rotation or nil
     else
-        flightDirection.lockedLook=nil
-        flightDirection.lockedRight=nil
+        flightDirection.lockedOrientation=nil
     end
     paintOptions()
 end)
 connect(UI.rotateButton.Activated,function()
     flightDirection.yawOffset=(flightDirection.yawOffset+45)%360
     UI.gui:SetAttribute("YawOffset",flightDirection.yawOffset)
+    -- The original Rotate Y control also rotates an unseated character,
+    -- even when FLY is switched OFF. Its existing steering offset remains.
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    local root=character and character:FindFirstChild("HumanoidRootPart")
+    if root and root:IsA("BasePart") and not root.Anchored
+        and humanoid and humanoid.Health>0 and not humanoid.SeatPart then
+        root.CFrame=root.CFrame*CFrame.Angles(0,math.rad(45),0)
+        if armed.mode=="character" and armed.orientation then
+            armed.orientation.CFrame=root.CFrame.Rotation
+        end
+        if flightDirection.lockDirection then
+            flightDirection.lockedOrientation=root.CFrame.Rotation
+        end
+    end
     tween(UI.rotateFx.energy,.14,{Value=1})
     task.delay(.22,function()
         if state.alive then tween(UI.rotateFx.energy,.20,{Value=0}) end
@@ -947,15 +961,25 @@ UI.launcherFire=UpdraftFire.new(UI.launcher,"LauncherFire","launcher",58,58,fals
 UI.launcherLetter.TextColor3=C.cyan
 
 -- Only UP and DOWN float on screen. Horizontal motion uses the native joystick.
-UI.pad=frame(UI.screen,"AltitudeControls",UDim2.new(1,-198,1,-96),UDim2.fromOffset(186,74),C.base,.21,"fixed")
+UI.pad=frame(UI.screen,"AltitudeControls",UDim2.new(1,-198,0,62),UDim2.fromOffset(186,97),C.base,.21,"fixed")
 UI.pad.Visible=false
 UI.pad.ZIndex=20
 corner(UI.pad,13)
 local padEdge=stroke(UI.pad,C.violet,.26,1.3)
 gradient(padEdge,{C.violet,C.cyan,C.silver,C.deep},25)
 local padFx=NeonFlow.new(UI.pad,"PadNeon",12,5.3,nil)
-UI.upButton,UI.upEffect=compactButton(UI.pad,"Up","UP",8,9,81,54)
-UI.downButton,UI.downEffect=compactButton(UI.pad,"Down","DOWN",97,9,81,54)
+-- The handle is separate from the touch controls; a finger can drag
+-- the panel without accidentally commanding ascent or descent.
+UI.padDrag=frame(UI.pad,"DragHandle",UDim2.fromOffset(7,2),UDim2.new(1,-14,0,24),nil,1,"fixed")
+UI.padDrag.Active=true
+UI.padDrag.ZIndex=24
+local dragHint=label(UI.padDrag,"DragHint","⋮⋮  DRAG  ⋮⋮",
+    UDim2.fromScale(0,0),UDim2.fromScale(1,1),12,C.silver,OPTION_FONT)
+dragHint.TextXAlignment=Enum.TextXAlignment.Center
+dragHint.Active=false
+dragHint.ZIndex=25
+UI.upButton,UI.upEffect=compactButton(UI.pad,"Up","UP",8,34,81,54)
+UI.downButton,UI.downEffect=compactButton(UI.pad,"Down","DOWN",97,34,81,54)
 UI.upButton.ZIndex=23
 UI.downButton.ZIndex=23
 for _,item in ipairs({{"up",UI.upButton,UI.upEffect},{"down",UI.downButton,UI.downEffect}})do
@@ -1065,16 +1089,20 @@ connect(RunService.Heartbeat,function()
         else
             attachCharacter(targetHumanoid,targetRoot)
         end
+        -- Switching from player to car (or back) establishes a new
+        -- rotation to hold whenever Lock Direction is enabled.
+        if flightDirection.lockDirection then
+            flightDirection.lockedOrientation=targetRoot.CFrame.Rotation
+        end
     end
     if not armed.velocity then return end
 
     local camera=workspace.CurrentCamera
     local cameraLook=camera and camera.CFrame.LookVector or targetRoot.CFrame.LookVector
     local cameraRight=camera and camera.CFrame.RightVector or targetRoot.CFrame.RightVector
-    local look=flightDirection.lockDirection and flightDirection.lockedLook or cameraLook
-    local right=flightDirection.lockDirection and flightDirection.lockedRight or cameraRight
-    look=look or cameraLook
-    right=right or cameraRight
+    -- Lock Direction must not lock translation. Steering still follows the camera.
+    local look=cameraLook
+    local right=cameraRight
 
     -- Rotate all steering axes around the world Y axis in 45° increments.
     local rotation=CFrame.fromAxisAngle(Vector3.yAxis,math.rad(flightDirection.yawOffset))
@@ -1099,7 +1127,21 @@ connect(RunService.Heartbeat,function()
     if direction.Magnitude>1 then direction=direction.Unit end
     armed.velocity.VectorVelocity=direction*speed
     if armed.orientation then
-        armed.orientation.CFrame=CFrame.lookAt(Vector3.zero,flatLook,Vector3.yAxis)
+        if flightDirection.lockDirection then
+            -- Preserve pitch, yaw and roll; allow movement without turning.
+            flightDirection.lockedOrientation=flightDirection.lockedOrientation
+                or targetRoot.CFrame.Rotation
+            armed.orientation.CFrame=flightDirection.lockedOrientation
+        else
+            -- OFF: flat horizontal turning only.
+            -- ON: follow camera pitch as well as horizontal camera direction.
+            local facing=flightDirection.lookUpDown and look.Unit or flatLook
+            local upAxis=Vector3.yAxis
+            if math.abs(facing.Y)>.985 and camera then
+                upAxis=camera.CFrame.UpVector
+            end
+            armed.orientation.CFrame=CFrame.lookAt(Vector3.zero,facing,upAxis)
+        end
     end
 end)
 
@@ -1132,7 +1174,10 @@ local function adjustLayout(initial)
             math.max(6,math.floor((vp.Y-windowHeight*factor)/2))
         )
     end
-    UI.pad.Position=UDim2.new(1,-198,1,-math.min(116,math.max(82,vp.Y*.18)))
+    -- Set default once. Do not snap the controls back after a user drags them.
+    if not altitudePadMoved then
+        UI.pad.Position=UDim2.new(1,-198,0,62)
+    end
 end
 connect(UI.foldButton.Activated,function()
     optionPanelOpen=not optionPanelOpen
@@ -1171,6 +1216,7 @@ local function beginDrag(target,input)
 end
 connect(UI.dragBar.InputBegan,function(input)beginDrag(UI.window,input)end)
 connect(UI.launcher.InputBegan,function(input)beginDrag(UI.launcher,input)end)
+connect(UI.padDrag.InputBegan,function(input)beginDrag(UI.pad,input)end)
 connect(Input.InputChanged,function(input)
     if not dragging then return end
     if dragging.touch and input~=dragging.input then return end
@@ -1179,7 +1225,17 @@ connect(Input.InputChanged,function(input)
     if delta.Magnitude<5 and not dragging.moved then return end
     dragging.moved=true
     local p=dragging.pos
-    dragging.target.Position=UDim2.new(p.X.Scale,p.X.Offset+delta.X,p.Y.Scale,p.Y.Offset+delta.Y)
+    if dragging.target==UI.pad then
+        -- Keep the altitude panel inside the viewport as it is moved.
+        local vp=UI.screen.AbsoluteSize
+        local extent=UI.pad.AbsoluteSize
+        local px=math.clamp(p.X.Scale*vp.X+p.X.Offset+delta.X,0,math.max(0,vp.X-extent.X))
+        local py=math.clamp(p.Y.Scale*vp.Y+p.Y.Offset+delta.Y,0,math.max(0,vp.Y-extent.Y))
+        UI.pad.Position=UDim2.fromOffset(px,py)
+        altitudePadMoved=true
+    else
+        dragging.target.Position=UDim2.new(p.X.Scale,p.X.Offset+delta.X,p.Y.Scale,p.Y.Offset+delta.Y)
+    end
 end)
 connect(Input.InputEnded,function(input)
     if not dragging then return end
