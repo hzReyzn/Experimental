@@ -1,0 +1,720 @@
+--[[
+    REYZN X | SILENT AIM EXPERIMENTAL
+    Standalone / Murderers VS Sheriffs: DUELS
+    Mobile-first | Amethyst / Cyan GUI | Made By Reyzn
+
+    Experimental targeting: hooks Mouse.Hit / Mouse.Target when a DUELS
+    weapon reads them. No camera rotation, no automatic shots.
+    Actual hit registration is controlled by the game/server.
+
+    Only THIS standalone file is installed; Reyzn X is untouched.
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then return end
+
+local ENV = (type(getgenv) == "function" and getgenv()) or _G
+local SESSION_KEY = "__ReyznSilentAimExperimentalV1"
+local HOOK_KEY = "__ReyznSilentAimExperimentalMouseHookV1"
+
+if ENV[SESSION_KEY] and type(ENV[SESSION_KEY].Destroy) == "function" then
+    pcall(function() ENV[SESSION_KEY]:Destroy() end)
+end
+
+local Colors = {
+    black = Color3.fromRGB(8, 8, 13),
+    base = Color3.fromRGB(12, 12, 20),
+    panel = Color3.fromRGB(20, 18, 30),
+    steel = Color3.fromRGB(64, 61, 82),
+    silver = Color3.fromRGB(220, 225, 239),
+    muted = Color3.fromRGB(167, 166, 190),
+    violet = Color3.fromRGB(157, 103, 239),
+    deep = Color3.fromRGB(73, 38, 126),
+    cyan = Color3.fromRGB(141, 220, 255),
+    pink = Color3.fromRGB(237, 120, 223),
+    green = Color3.fromRGB(139, 235, 187),
+    red = Color3.fromRGB(255, 133, 154)
+}
+
+local FONT = Enum.Font.GothamMedium
+local TITLE_FONT = Enum.Font.GothamBold
+local Rajdhani
+pcall(function()
+    Rajdhani = Font.new(
+        "rbxassetid://12187375422",
+        Enum.FontWeight.SemiBold,
+        Enum.FontStyle.Normal
+    )
+end)
+
+local State = {
+    alive = true,
+    enabled = false,
+    wallCheck = true,
+    targetPart = "Head",
+    fov = 145,
+    maxDistance = 1000,
+    hookReady = false,
+    connections = {},
+    gui = nil,
+    target = nil,
+    previewTimer = 0,
+    minimized = false
+}
+
+ENV[SESSION_KEY] = State
+
+local function connect(signal, callback)
+    local c = signal:Connect(callback)
+    table.insert(State.connections, c)
+    return c
+end
+
+local function create(class, parent, props)
+    local item = Instance.new(class)
+    for key, value in pairs(props or {}) do
+        item[key] = value
+    end
+    if item:IsA("GuiObject") then
+        item.BorderSizePixel = 0
+    end
+    item.Parent = parent
+    return item
+end
+
+local function corner(parent, size)
+    return create("UICorner", parent, {
+        CornerRadius = UDim.new(0, size or 10)
+    })
+end
+
+local function stroke(parent, color, width, opacity)
+    return create("UIStroke", parent, {
+        Color = color or Colors.violet,
+        Thickness = width or 1,
+        Transparency = opacity or 0,
+        ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    })
+end
+
+local function gradient(parent, colors, rotation)
+    local keys = {}
+    for i, color in ipairs(colors) do
+        keys[i] = ColorSequenceKeypoint.new(
+            (i - 1) / (#colors - 1),
+            color
+        )
+    end
+    return create("UIGradient", parent, {
+        Color = ColorSequence.new(keys),
+        Rotation = rotation or 0
+    })
+end
+
+local function text(parent, value, pos, size, px, color, alignment, bold)
+    local item = create("TextLabel", parent, {
+        Text = value,
+        Size = size,
+        Position = pos,
+        TextColor3 = color or Colors.silver,
+        BackgroundTransparency = 1,
+        Font = bold and TITLE_FONT or FONT,
+        TextSize = px or 15,
+        TextXAlignment = alignment or Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+        TextTruncate = Enum.TextTruncate.AtEnd,
+        TextStrokeTransparency = 1
+    })
+    if Rajdhani then
+        pcall(function() item.FontFace = Rajdhani end)
+    end
+    return item
+end
+
+local function button(parent, value, pos, size, color)
+    local item = create("TextButton", parent, {
+        Text = value,
+        Size = size,
+        Position = pos,
+        BackgroundColor3 = color or Colors.panel,
+        TextColor3 = Colors.silver,
+        TextSize = 15,
+        AutoButtonColor = false,
+        Font = TITLE_FONT
+    })
+    corner(item, 9)
+    stroke(item, Colors.steel, 1, 0.2)
+    if Rajdhani then
+        pcall(function() item.FontFace = Rajdhani end)
+    end
+    return item
+end
+
+local function getDuelId(player)
+    local id = player:GetAttribute("Game")
+    if id == nil or tostring(id) == "" then return nil end
+    return id
+end
+
+local function equippedDuelWeapon()
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if not tool then return false end
+    -- These two objects occur in public DUELS implementations.
+    return tool:FindFirstChild("fire") ~= nil
+        and tool:FindFirstChild("showBeam") ~= nil
+end
+
+local function isVisible(part)
+    if not State.wallCheck then return true end
+    local camera = Workspace.CurrentCamera
+    if not camera then return false end
+    local origin = camera.CFrame.Position
+    local difference = part.Position - origin
+    if difference.Magnitude < 0.01 then return true end
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {
+        LocalPlayer.Character
+    }
+    params.IgnoreWater = true
+
+    local hit = Workspace:Raycast(origin, difference, params)
+    return hit == nil or hit.Instance:IsDescendantOf(part.Parent)
+end
+
+function State:GetTarget(requireWeapon)
+    if not self.alive or not self.enabled then return nil end
+    if requireWeapon and not equippedDuelWeapon() then return nil end
+
+    local camera = Workspace.CurrentCamera
+    if not camera then return nil end
+    local myGame = getDuelId(LocalPlayer)
+    local myTeam = LocalPlayer:GetAttribute("Team")
+    if not myGame or myTeam == nil then return nil end
+
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil end
+
+    local center = Vector2.new(
+        camera.ViewportSize.X * 0.5,
+        camera.ViewportSize.Y * 0.5
+    )
+    local nearest, nearestPixels = nil, self.fov
+
+    for _, other in ipairs(Players:GetPlayers()) do
+        if other ~= LocalPlayer
+            and getDuelId(other) == myGame
+            and other:GetAttribute("Team") ~= nil
+            and other:GetAttribute("Team") ~= myTeam then
+
+            local char = other.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local part = char and (
+                char:FindFirstChild(self.targetPart)
+                or char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("HumanoidRootPart")
+            )
+
+            if hum and hum.Health > 0 and part then
+                local worldDistance = (part.Position - myRoot.Position).Magnitude
+                if worldDistance <= self.maxDistance then
+                    local point, onScreen = camera:WorldToViewportPoint(part.Position)
+                    if onScreen and point.Z > 0 then
+                        local pixels = (
+                            Vector2.new(point.X, point.Y) - center
+                        ).Magnitude
+
+                        if pixels < nearestPixels and isVisible(part) then
+                            nearest = part
+                            nearestPixels = pixels
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nearest
+end
+
+-- A single persistent hook, shared by re-executions.
+-- Clicking OFF, closing the GUI, or replacing this script disables its effect.
+local Hook = ENV[HOOK_KEY]
+if type(Hook) ~= "table" then
+    Hook = {
+        installed = false,
+        owner = nil,
+        mouse = LocalPlayer:GetMouse()
+    }
+    ENV[HOOK_KEY] = Hook
+end
+Hook.owner = State
+
+if not Hook.installed and type(hookmetamethod) == "function" then
+    local oldIndex
+    local function intercept(object, key)
+        local current = Hook.owner
+        if current
+            and current.alive
+            and current.enabled
+            and object == Hook.mouse
+            and (key == "Hit" or key == "Target") then
+
+            local callerIsExecutor = false
+            if type(checkcaller) == "function" then
+                local ok, value = pcall(checkcaller)
+                callerIsExecutor = ok and value == true
+            end
+
+            if not callerIsExecutor then
+                local ok, target = pcall(
+                    current.GetTarget, current, true
+                )
+                if ok and target then
+                    if key == "Target" then
+                        return target
+                    end
+                    return CFrame.new(target.Position)
+                end
+            end
+        end
+        return oldIndex(object, key)
+    end
+
+    local wrapped = intercept
+    if type(newcclosure) == "function" then
+        wrapped = newcclosure(intercept)
+    end
+
+    local ok, original = pcall(function()
+        return hookmetamethod(game, "__index", wrapped)
+    end)
+    if ok and type(original) == "function" then
+        oldIndex = original
+        Hook.installed = true
+    else
+        warn("[Reyzn Silent Aim] Could not install Mouse hook")
+    end
+end
+State.hookReady = Hook.installed
+
+-- Standalone GUI, not parented to or dependent on Reyzn X.
+local gui = create("ScreenGui", nil, {
+    Name = "ReyznSilentAimExperimental",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true,
+    DisplayOrder = 9000,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+})
+State.gui = gui
+
+local parentOK = pcall(function()
+    if type(gethui) == "function" then
+        gui.Parent = gethui()
+    else
+        gui.Parent = game:GetService("CoreGui")
+    end
+end)
+if not parentOK or not gui.Parent then
+    gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local main = create("Frame", gui, {
+    Name = "Main",
+    AnchorPoint = Vector2.new(.5, .5),
+    Position = UDim2.fromScale(.5, .5),
+    Size = UDim2.fromOffset(344, 368),
+    BackgroundColor3 = Colors.base,
+    Active = true
+})
+corner(main, 16)
+local mainBorder = stroke(main, Colors.silver, 1.65, 0.14)
+local mainGradient = gradient(mainBorder, {
+    Colors.steel, Colors.violet, Colors.cyan, Colors.silver, Colors.violet
+}, 28)
+
+local panelScale = create("UIScale", main, {
+    Scale = 1
+})
+
+local underGlow = create("Frame", main, {
+    Position = UDim2.fromOffset(1, 1),
+    Size = UDim2.new(1, -2, 1, -2),
+    BackgroundColor3 = Colors.panel,
+    BackgroundTransparency = .16,
+    ZIndex = 0
+})
+corner(underGlow, 15)
+gradient(underGlow, {
+    Color3.fromRGB(24, 21, 39),
+    Colors.black,
+    Color3.fromRGB(11, 20, 30)
+}, 55)
+
+local header = create("Frame", main, {
+    Position = UDim2.fromOffset(1, 1),
+    Size = UDim2.new(1, -2, 0, 67),
+    BackgroundColor3 = Colors.panel,
+    ZIndex = 2
+})
+corner(header, 15)
+gradient(header, {
+    Colors.deep, Colors.panel, Colors.black
+}, 12)
+
+local accent = create("Frame", header, {
+    Position = UDim2.fromOffset(16, 56),
+    Size = UDim2.new(1, -32, 0, 2),
+    BackgroundColor3 = Colors.cyan,
+    ZIndex = 3
+})
+corner(accent, 2)
+local accentGradient = gradient(accent, {
+    Colors.deep, Colors.violet, Colors.cyan, Colors.pink, Colors.deep
+}, 0)
+
+text(header, "REYZN  X", UDim2.fromOffset(17, 11),
+    UDim2.fromOffset(218, 28), 23, Colors.silver,
+    Enum.TextXAlignment.Left, true).ZIndex = 3
+text(header, "SILENT AIM  /  EXPERIMENTAL",
+    UDim2.fromOffset(18, 39), UDim2.fromOffset(265, 14),
+    11, Colors.cyan).ZIndex = 3
+
+local minimize = button(header, "–",
+    UDim2.new(1, -72, 0, 12), UDim2.fromOffset(25, 26),
+    Colors.panel)
+local close = button(header, "×",
+    UDim2.new(1, -40, 0, 12), UDim2.fromOffset(25, 26),
+    Colors.panel)
+minimize.ZIndex, close.ZIndex = 4, 4
+
+local function card(y, height)
+    local f = create("Frame", main, {
+        Position = UDim2.fromOffset(16, y),
+        Size = UDim2.new(1, -32, 0, height),
+        BackgroundColor3 = Colors.panel,
+        BackgroundTransparency = .06,
+        ZIndex = 2
+    })
+    corner(f, 11)
+    stroke(f, Colors.steel, 1, .44)
+    return f
+end
+
+local toggleCard = card(81, 62)
+text(toggleCard, "SILENT AIM", UDim2.fromOffset(13, 8),
+    UDim2.fromOffset(175, 22), 17, Colors.silver,
+    Enum.TextXAlignment.Left, true).ZIndex = 3
+text(toggleCard, "Redirect Mouse.Hit / Target", UDim2.fromOffset(13, 33),
+    UDim2.fromOffset(190, 17), 11, Colors.muted).ZIndex = 3
+
+local toggle = button(toggleCard, "OFF",
+    UDim2.new(1, -86, 0, 13), UDim2.fromOffset(72, 35),
+    Colors.steel)
+toggle.ZIndex = 3
+local toggleEdge = stroke(toggle, Colors.red, 1.25, .28)
+
+local fovCard = card(153, 91)
+text(fovCard, "FOV RADIUS",
+    UDim2.fromOffset(13, 8), UDim2.fromOffset(180, 22),
+    15, Colors.silver, Enum.TextXAlignment.Left, true).ZIndex = 3
+local fovValue = text(fovCard, "145 px",
+    UDim2.new(1, -90, 0, 8), UDim2.fromOffset(72, 22),
+    15, Colors.cyan, Enum.TextXAlignment.Right)
+fovValue.ZIndex = 3
+
+local track = create("Frame", fovCard, {
+    Position = UDim2.fromOffset(16, 51),
+    Size = UDim2.new(1, -32, 0, 8),
+    BackgroundColor3 = Colors.steel,
+    BackgroundTransparency = .15,
+    Active = true,
+    ZIndex = 3
+})
+corner(track, 8)
+local fill = create("Frame", track, {
+    Size = UDim2.fromScale(.5, 1),
+    BackgroundColor3 = Colors.cyan,
+    ZIndex = 4
+})
+corner(fill, 8)
+gradient(fill, {Colors.deep, Colors.violet, Colors.cyan}, 0)
+local thumb = create("Frame", track, {
+    AnchorPoint = Vector2.new(.5, .5),
+    Position = UDim2.fromScale(.5, .5),
+    Size = UDim2.fromOffset(17, 17),
+    BackgroundColor3 = Colors.silver,
+    ZIndex = 5
+})
+corner(thumb, 20)
+stroke(thumb, Colors.cyan, 2, .05)
+
+local wallCard = card(254, 44)
+text(wallCard, "WALL CHECK", UDim2.fromOffset(13, 8),
+    UDim2.fromOffset(173, 28), 15, Colors.silver,
+    Enum.TextXAlignment.Left, true).ZIndex = 3
+local wallButton = button(wallCard, "ON",
+    UDim2.new(1, -80, 0, 7), UDim2.fromOffset(66, 30),
+    Colors.deep)
+wallButton.ZIndex = 3
+
+local partCard = card(308, 43)
+text(partCard, "TARGET PART", UDim2.fromOffset(13, 8),
+    UDim2.fromOffset(173, 28), 15, Colors.silver,
+    Enum.TextXAlignment.Left, true).ZIndex = 3
+local partButton = button(partCard, "HEAD",
+    UDim2.new(1, -101, 0, 7), UDim2.fromOffset(87, 29),
+    Colors.deep)
+partButton.ZIndex = 3
+
+local statusText = text(main, "STANDBY",
+    UDim2.fromOffset(18, 349), UDim2.new(1, -32, 0, 15),
+    11, Colors.muted)
+statusText.ZIndex = 3
+
+local launcher = create("TextButton", gui, {
+    Name = "Restore",
+    Position = UDim2.new(0, 24, .45, 0),
+    Size = UDim2.fromOffset(55, 55),
+    BackgroundColor3 = Colors.base,
+    Text = "R",
+    TextSize = 37,
+    TextColor3 = Colors.silver,
+    Font = Enum.Font.Garamond,
+    AutoButtonColor = false,
+    Active = true,
+    Visible = false
+})
+corner(launcher, 15)
+local logoStroke = stroke(launcher, Colors.violet, 2, .05)
+local logoGradient = gradient(logoStroke, {
+    Colors.violet, Colors.cyan, Colors.silver, Colors.pink, Colors.violet
+}, 24)
+
+local ring = create("Frame", gui, {
+    Name = "FOV",
+    AnchorPoint = Vector2.new(.5, .5),
+    BackgroundTransparency = 1,
+    Visible = false,
+    Active = false
+})
+corner(ring, 9999)
+local ringStroke = stroke(ring, Colors.cyan, 1.4, .34)
+
+local function updateRing()
+    local camera = Workspace.CurrentCamera
+    if not camera then return end
+    ring.Position = UDim2.fromOffset(
+        camera.ViewportSize.X * .5,
+        camera.ViewportSize.Y * .5
+    )
+    ring.Size = UDim2.fromOffset(State.fov * 2, State.fov * 2)
+end
+
+local function updateFov()
+    local percent = (State.fov - 40) / 280
+    fovValue.Text = ("%d px"):format(State.fov)
+    fill.Size = UDim2.fromScale(percent, 1)
+    thumb.Position = UDim2.fromScale(percent, .5)
+    updateRing()
+end
+updateFov()
+
+local function refresh()
+    toggle.Text = State.enabled and "ON" or "OFF"
+    toggle.BackgroundColor3 = State.enabled and Colors.deep or Colors.steel
+    toggleEdge.Color = State.enabled and Colors.cyan or Colors.red
+
+    wallButton.Text = State.wallCheck and "ON" or "OFF"
+    wallButton.BackgroundColor3 = State.wallCheck and Colors.deep or Colors.steel
+    partButton.Text = State.targetPart == "Head" and "HEAD" or "TORSO"
+    ring.Visible = State.enabled
+    if not State.hookReady then
+        toggle.Text = "N/A"
+        statusText.Text = "HOOK NOT SUPPORTED BY EXECUTOR"
+        statusText.TextColor3 = Colors.red
+    elseif not State.enabled then
+        statusText.Text = "STANDBY  |  MOBILE READY"
+        statusText.TextColor3 = Colors.muted
+    end
+end
+refresh()
+
+connect(toggle.MouseButton1Click, function()
+    if not State.hookReady then return end
+    State.enabled = not State.enabled
+    State.target = nil
+    refresh()
+end)
+connect(wallButton.MouseButton1Click, function()
+    State.wallCheck = not State.wallCheck
+    refresh()
+end)
+connect(partButton.MouseButton1Click, function()
+    State.targetPart = State.targetPart == "Head"
+        and "UpperTorso" or "Head"
+    refresh()
+end)
+
+-- Touch- and mouse-friendly slider.
+local sliderInput, sliderDragging
+local function sliderSet(x)
+    if track.AbsoluteSize.X < 1 then return end
+    local fraction = math.clamp(
+        (x - track.AbsolutePosition.X) / track.AbsoluteSize.X,
+        0, 1
+    )
+    State.fov = math.floor(40 + fraction * 280 + .5)
+    updateFov()
+end
+connect(track.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.Touch
+        or input.UserInputType == Enum.UserInputType.MouseButton1 then
+        sliderInput, sliderDragging = input, true
+        sliderSet(input.Position.X)
+    end
+end)
+connect(UserInputService.InputChanged, function(input)
+    if sliderDragging
+        and (input == sliderInput
+        or (sliderInput
+            and sliderInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseMovement)) then
+        sliderSet(input.Position.X)
+    end
+end)
+connect(UserInputService.InputEnded, function(input)
+    if input == sliderInput then
+        sliderInput, sliderDragging = nil, false
+    end
+end)
+
+-- Draggable title + draggable minimized logo.
+local dragTarget, dragInput, dragStart, startPosition, moved
+local function startDrag(target, input)
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then
+        return
+    end
+    dragTarget, dragInput = target, input
+    dragStart, startPosition = input.Position, target.Position
+    moved = false
+end
+connect(header.InputBegan, function(input)
+    startDrag(main, input)
+end)
+connect(launcher.InputBegan, function(input)
+    startDrag(launcher, input)
+end)
+connect(UserInputService.InputChanged, function(input)
+    if not dragTarget then return end
+    if input ~= dragInput
+        and not (dragInput
+            and dragInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseMovement) then
+        return
+    end
+    local delta = input.Position - dragStart
+    if delta.Magnitude > 8 then moved = true end
+    dragTarget.Position = UDim2.new(
+        startPosition.X.Scale,
+        startPosition.X.Offset + delta.X,
+        startPosition.Y.Scale,
+        startPosition.Y.Offset + delta.Y
+    )
+end)
+connect(UserInputService.InputEnded, function(input)
+    if input == dragInput
+        or (dragInput
+            and dragInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseButton1) then
+        dragTarget, dragInput = nil, nil
+    end
+end)
+
+connect(minimize.MouseButton1Click, function()
+    State.minimized = true
+    main.Visible = false
+    launcher.Visible = true
+end)
+connect(launcher.MouseButton1Click, function()
+    if moved then
+        moved = false
+        return
+    end
+    State.minimized = false
+    main.Visible = true
+    launcher.Visible = false
+end)
+
+function State:Destroy()
+    if not self.alive then return end
+    self.enabled = false
+    self.alive = false
+    if Hook.owner == self then Hook.owner = nil end
+    for _, connection in ipairs(self.connections) do
+        connection:Disconnect()
+    end
+    table.clear(self.connections)
+    if self.gui then self.gui:Destroy() end
+    if ENV[SESSION_KEY] == self then ENV[SESSION_KEY] = nil end
+end
+connect(close.MouseButton1Click, function()
+    State:Destroy()
+end)
+
+local updateTime = 0
+connect(RunService.Heartbeat, function(dt)
+    updateTime += dt
+    if updateTime < .09 then return end
+    updateTime = 0
+
+    local camera = Workspace.CurrentCamera
+    if camera then
+        panelScale.Scale = math.min(
+            1,
+            (camera.ViewportSize.X - 20) / 344,
+            (camera.ViewportSize.Y - 30) / 368
+        )
+    end
+
+    updateRing()
+    mainGradient.Offset = Vector2.new(math.sin(os.clock() * .5) * .28, 0)
+    logoGradient.Offset = Vector2.new(math.sin(os.clock() * .7) * .35, 0)
+    accentGradient.Offset = Vector2.new(math.sin(os.clock() * .8) * .22, 0)
+
+    if not State.enabled or not State.hookReady then return end
+    if not getDuelId(LocalPlayer)
+        or LocalPlayer:GetAttribute("Team") == nil then
+        statusText.Text = "WAITING FOR AN ACTIVE DUEL"
+        statusText.TextColor3 = Colors.muted
+        return
+    end
+    if not equippedDuelWeapon() then
+        statusText.Text = "EQUIP YOUR DUELS RANGED TOOL"
+        statusText.TextColor3 = Colors.muted
+        return
+    end
+
+    local target = State:GetTarget(false)
+    if target and target.Parent then
+        statusText.Text = "TARGET: " .. target.Parent.Name
+        statusText.TextColor3 = Colors.green
+    else
+        statusText.Text = "NO TARGET INSIDE FOV"
+        statusText.TextColor3 = Colors.muted
+    end
+end)
+
+print("[Reyzn X] Silent Aim Experimental loaded")
+print(State.hookReady
+    and "[Reyzn X] Mouse hook ready (experimental)"
+    or "[Reyzn X] Mouse hook unsupported; GUI only")
