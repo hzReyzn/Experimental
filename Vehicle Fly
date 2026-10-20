@@ -416,7 +416,8 @@ local function surface(parent,name,pos,size,scope)
     inner.ZIndex=3;beam.ZIndex=3;sheen.ZIndex=3
     addReflection(sheen,sweep,.035)
     return o,{edge=edge,metal=metal,beam=beam,beamGradient=beamGradient,inward=inward,neon=neon}
-endlocal function noise(seed) return (math.sin(seed*12.9898+78.233)*43758.5453)%1 end
+end
+local function noise(seed) return (math.sin(seed*12.9898+78.233)*43758.5453)%1 end
 local UpdraftFire={};UpdraftFire.__index=UpdraftFire
 local firePink=Color3.fromRGB(183,48,139)
 local firePurple=Color3.fromRGB(151,62,246)
@@ -536,7 +537,8 @@ function UpdraftFire:update(time,burst)
         p.node.Position=UDim2.fromOffset(x,y)
         alpha(p.node,"BackgroundTransparency",1-math.sin(age*math.pi)^2*.62)
     end
-endlocal FeatureToggle={};FeatureToggle.__index=FeatureToggle
+end
+local FeatureToggle={};FeatureToggle.__index=FeatureToggle
 function FeatureToggle.new(parent,name,title,controller)
     local b=make("TextButton",parent,{Name=name,Text="",Position=UDim2.fromOffset(5,6),
         Size=UDim2.fromOffset(340,60),BackgroundTransparency=1,AutoButtonColor=false,Active=true,Selectable=true})
