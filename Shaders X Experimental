@@ -689,11 +689,43 @@ local waterProperties={"WaterReflectance","WaterTransparency","WaterWaveSize","W
 local originals=nil
 local createdEffects={}
 local mutedEffects={}
-local reflectiveParts={}
-local reflectivePartsSeen={}
+local reflectiveParts={} -- keyed by the real part; saved only once per piece
+local reflectCount=0
+local sheenCount=0
 local shaderActive=false
 local scanElapsed=0
-local maxFloors=30
+local maxFloors=220 -- more than seven times the old coverage, with nearby eviction
+local maxSheens=70 -- translucent fallback sheen is deliberately capped for mobile
+local scanInterval=2.5
+-- Floor-friendly reflectance. Roblox renders specular highlights differently
+-- according to the material, camera angle and the player's graphics settings.
+local materialTargets={
+    [Enum.Material.SmoothPlastic]=.19,
+    [Enum.Material.Plastic]=.17,
+    [Enum.Material.Concrete]=.13,
+    [Enum.Material.Brick]=.12,
+    [Enum.Material.Metal]=.16,
+    [Enum.Material.DiamondPlate]=.13,
+    [Enum.Material.Marble]=.16,
+    [Enum.Material.Granite]=.12,
+    [Enum.Material.Slate]=.11,
+    [Enum.Material.Wood]=.095,
+    [Enum.Material.WoodPlanks]=.095,
+    [Enum.Material.Grass]=.085,
+    [Enum.Material.Sand]=.075,
+    [Enum.Material.Glass]=.14
+}
+local sheenMaterials={
+    [Enum.Material.Concrete]=true,
+    [Enum.Material.Brick]=true,
+    [Enum.Material.Grass]=true,
+    [Enum.Material.Wood]=true,
+    [Enum.Material.WoodPlanks]=true,
+    [Enum.Material.Granite]=true,
+    [Enum.Material.Slate]=true,
+    [Enum.Material.Plastic]=true,
+    [Enum.Material.SmoothPlastic]=true
+}
 
 local function safeRead(target,key)
     local ok,result=pcall(function() return target[key] end)
@@ -733,13 +765,17 @@ local function restoreShader()
     end
     table.clear(mutedEffects)
 
-    for _,entry in ipairs(reflectiveParts) do
-        if entry.part and entry.part.Parent then
-            safeWrite(entry.part,"Reflectance",entry.value)
+    -- Disconnect first so our persistence listener cannot undo restoration.
+    for part,entry in pairs(reflectiveParts) do
+        if entry.connection then entry.connection:Disconnect() end
+        if entry.sheen then pcall(function()entry.sheen:Destroy()end) end
+        if part and part.Parent then
+            safeWrite(part,"Reflectance",entry.original)
         end
+        reflectiveParts[part]=nil
     end
-    table.clear(reflectiveParts)
-    table.clear(reflectivePartsSeen)
+    reflectCount=0
+    sheenCount=0
 
     if originals then
         for key,value in pairs(originals.lighting) do
@@ -755,6 +791,7 @@ local function restoreShader()
     scanElapsed=0
     UI.gui:SetAttribute("ShadersEnabled",false)
     UI.gui:SetAttribute("ReflectiveSurfaces",0)
+    UI.gui:SetAttribute("SheenSurfaces",0)
 end
 
 local function muteOverpoweringEffects()
@@ -782,43 +819,164 @@ local function addEffect(effect)
     return effect
 end
 
+-- Keep a mild, view-independent highlight on ordinary flat slabs that
+-- do not render true sky reflections on mobile. This is a transparent sunlit
+-- sheen, NOT a mirror reflection of other objects or structures.
+local function addFloorSheen(part)
+    local surface=Instance.new("SurfaceGui")
+    surface.Name="ShadersX_PersistentFloorSheen"
+    surface.Face=Enum.NormalId.Top
+    surface.AlwaysOnTop=false
+    surface.LightInfluence=.70
+    surface.SizingMode=Enum.SurfaceGuiSizingMode.PixelsPerStud
+    surface.PixelsPerStud=2
+    surface.Parent=part
+
+    local glow=Instance.new("Frame")
+    glow.Name="SunlitGlaze"
+    glow.Size=UDim2.fromScale(1,1)
+    glow.BorderSizePixel=0
+    glow.BackgroundColor3=Color3.fromRGB(255,234,224)
+    glow.BackgroundTransparency=.78
+    glow.Active=false
+    glow.Parent=surface
+    local grad=Instance.new("UIGradient")
+    grad.Rotation=27
+    grad.Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,Color3.fromRGB(175,157,199)),
+        ColorSequenceKeypoint.new(.48,Color3.fromRGB(255,224,181)),
+        ColorSequenceKeypoint.new(1,Color3.fromRGB(185,166,215))
+    })
+    grad.Transparency=NumberSequence.new({
+        NumberSequenceKeypoint.new(0,1),
+        NumberSequenceKeypoint.new(.28,.92),
+        NumberSequenceKeypoint.new(.46,.43),
+        NumberSequenceKeypoint.new(.58,.65),
+        NumberSequenceKeypoint.new(.79,.94),
+        NumberSequenceKeypoint.new(1,1)
+    })
+    grad.Parent=glow
+    return surface
+end
+
+local function releaseFloor(part,entry)
+    if not entry then return end
+    reflectiveParts[part]=nil
+    reflectCount=math.max(0,reflectCount-1)
+    if entry.connection then
+        entry.connection:Disconnect()
+        entry.connection=nil
+    end
+    if entry.sheen then
+        pcall(function()entry.sheen:Destroy()end)
+        entry.sheen=nil
+        sheenCount=math.max(0,sheenCount-1)
+    end
+    if part and part.Parent then
+        safeWrite(part,"Reflectance",entry.original)
+    end
+end
+
+local function qualifiesForFloor(part)
+    if not part:IsA("BasePart") or not part.Anchored then return false end
+    if part.Transparency>.35 or part.Size.X<5 or part.Size.Z<5 then return false end
+    if part.CFrame.UpVector.Y<.83 then return false end
+    if part:FindFirstChildOfClass("SurfaceAppearance") then return false end
+    return materialTargets[part.Material]~=nil
+end
+
+local function addFloor(part)
+    if reflectiveParts[part] or reflectCount>=maxFloors then return end
+    local previous=safeRead(part,"Reflectance")
+    if type(previous)~="number" then return end
+    local desired=math.max(previous,materialTargets[part.Material] or .10)
+    local entry={original=previous,target=desired,connection=nil,sheen=nil,busy=false}
+    if desired>previous+.005 and not safeWrite(part,"Reflectance",desired) then return end
+    reflectiveParts[part]=entry
+    reflectCount+=1
+
+    -- The original shader wrote Reflectance ONCE; other game scripts could
+    -- immediately reset it. Reapply only when a tracked value is lowered.
+    entry.connection=part:GetPropertyChangedSignal("Reflectance"):Connect(function()
+        if not shaderActive or entry.busy or not part.Parent then return end
+        local current=safeRead(part,"Reflectance")
+        if type(current)=="number" and current<entry.target-.008 then
+            entry.busy=true
+            safeWrite(part,"Reflectance",entry.target)
+            entry.busy=false
+        end
+    end)
+end
+
 local function enhanceNearbyFloors()
-    -- Roblox BasePart.Reflectance can add sky highlights on large, flat,
-    -- smooth ground pieces. It cannot render structure reflections.
-    -- Bounded local search to avoid scanning huge games every frame on mobile.
-    if not shaderActive or #reflectiveParts>=maxFloors then return end
+    if not shaderActive then return end
     local character=player.Character
-    local center=character and character:FindFirstChild("HumanoidRootPart")
-    if not center or not center:IsA("BasePart") then return end
+    local root=character and character:FindFirstChild("HumanoidRootPart")
+    if not root or not root:IsA("BasePart") then return end
+    local center=root.Position
+
+    -- Unload distant floor effects, including their connections and GUI
+    -- overlays, so a player can fly to a new island without hitting the cap.
+    for part,entry in pairs(reflectiveParts) do
+        if not part.Parent or not part:IsDescendantOf(workspace)
+            or (part.Position-center).Magnitude>340 then
+            releaseFloor(part,entry)
+        end
+    end
 
     local params=OverlapParams.new()
-    params.MaxParts=220
-    local ok,nearby=pcall(function()
-        return workspace:GetPartBoundsInRadius(center.Position,145,params)
+    params.MaxParts=1400
+    params.FilterDescendantsInstances={character}
+    local ok,parts=pcall(function()
+        return workspace:GetPartBoundsInRadius(center,225,params)
     end)
-    if not ok or not nearby then return end
+    if not ok or not parts then return end
 
-    for _,part in ipairs(nearby) do
-        if #reflectiveParts>=maxFloors then break end
-        if not reflectivePartsSeen[part]
-            and part:IsA("BasePart")
-            and part.Anchored
-            and part.Transparency<.20
-            and part.Size.X>=14 and part.Size.Z>=14
-            and part.CFrame.UpVector.Y>.96
-            and (part.Material==Enum.Material.SmoothPlastic
-                or part.Material==Enum.Material.Plastic)
-            and not part:FindFirstChildOfClass("SurfaceAppearance") then
-            local previous=safeRead(part,"Reflectance")
-            if type(previous)=="number" and previous<.085 then
-                if safeWrite(part,"Reflectance",.085) then
-                    reflectivePartsSeen[part]=true
-                    reflectiveParts[#reflectiveParts+1]={part=part,value=previous}
+    local candidates={}
+    for _,part in ipairs(parts) do
+        if qualifiesForFloor(part) then
+            candidates[#candidates+1]={
+                part=part,
+                distance=(part.Position-center).Magnitude
+            }
+        end
+    end
+    table.sort(candidates,function(a,b) return a.distance<b.distance end)
+
+    for _,candidate in ipairs(candidates) do
+        local part=candidate.part
+        local entry=reflectiveParts[part]
+        if not entry and reflectCount<maxFloors then
+            addFloor(part)
+            entry=reflectiveParts[part]
+        end
+        if entry then
+            -- Periodic verification also covers streaming/replication resets.
+            local value=safeRead(part,"Reflectance")
+            if type(value)=="number" and value<entry.target-.008 then
+                entry.busy=true
+                safeWrite(part,"Reflectance",entry.target)
+                entry.busy=false
+            end
+            if entry.sheen and not entry.sheen.Parent then
+                entry.sheen=nil
+                sheenCount=math.max(0,sheenCount-1)
+            end
+            if not entry.sheen and sheenCount<maxSheens and
+                sheenMaterials[part.Material] and part:IsA("Part") and
+                part.Size.X>=10 and part.Size.Z>=10 and
+                part.Size.X<=240 and part.Size.Z<=240 and
+                part.Transparency<.20 then
+                local made,gui=pcall(addFloorSheen,part)
+                if made then
+                    entry.sheen=gui
+                    sheenCount+=1
                 end
             end
         end
     end
-    UI.gui:SetAttribute("ReflectiveSurfaces",#reflectiveParts)
+    UI.gui:SetAttribute("ReflectiveSurfaces",reflectCount)
+    UI.gui:SetAttribute("SheenSurfaces",sheenCount)
 end
 
 local function enableShader()
@@ -868,8 +1026,10 @@ local function enableShader()
 
         local rays=Instance.new("SunRaysEffect")
         rays.Name="ShadersX_SunsetRays"
-        rays.Intensity=.04
-        rays.Spread=.78
+        -- A mild but more visible halo when looking toward the real sun.
+        -- Roblox decides the final effect based on renderer and sun angle.
+        rays.Intensity=.085
+        rays.Spread=.82
         rays.Enabled=true
         addEffect(rays)
         -- No BlurEffect or DepthOfFieldEffect is created.
@@ -907,7 +1067,7 @@ end
 connect(RunService.Heartbeat,function(dt)
     if not shaderActive then return end
     scanElapsed+=dt
-    if scanElapsed>=6 then
+    if scanElapsed>=scanInterval then
         scanElapsed=0
         enhanceNearbyFloors()
     end
