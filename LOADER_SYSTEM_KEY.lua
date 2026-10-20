@@ -876,7 +876,7 @@ stroke(UI.keySplashTrack,C.steel,.35,1)
 UI.keySplashTrack.ZIndex=6
 UI.keySplashFill=frame(UI.keySplashTrack,"LoadingFill",
     UDim2.fromScale(0,0),UDim2.new(0,0,1,0),C.violet)
-round(UI.keySplashFill,8)
+corner(UI.keySplashFill,8)
 gradient(UI.keySplashFill,{C.deep,C.violet,C.cyan,C.chrome},0)
 UI.keySplashFill.ZIndex=7
 UI.keySplashPercent=label(UI.keySplashPanel,"LoadingPercent","0%",
