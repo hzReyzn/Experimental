@@ -1,7 +1,7 @@
 -- SHADERS X | AMETHYST EDITION
--- Standalone reversible cinematic shader in an authentic Reyzn X GUI.
+-- Standalone reversible sharp sunset shader in an authentic Reyzn X GUI.
 -- Changes only Experimental/Shaders X Experimental.
--- One switch: ON applies cold cinematic Lighting; OFF restores its prior values.
+-- One switch: ON adds sharp sunset, soft reflections and shadows; OFF restores prior values.
 local Players = game:GetService("Players")
 local Input = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -651,90 +651,267 @@ end
 
 
 
--- RTX Cinematic Graphics (Cold / Day) by vxxfps, adapted as reversible
--- Lighting settings. We never execute the original external GUI/loader.
+-- Shaders X: Sharp Sunset. Adapted from hy0ng/shader-mobile-roblox.
+-- Preserves the original third shader's sunset sky and palette without
+-- duplicate Blur/Bloom stacks. Only owner-local graphical properties change.
+-- Floor sheen reflects sky/ambient light, not 3D structures or mirror images.
 local Lighting=game:GetService("Lighting")
-local props={"Ambient","OutdoorAmbient","Brightness","ClockTime"}
-local saved=nil
-local created={}
-local active=false
-local PROFILE={
-    Ambient=Color3.fromRGB(120,135,160),
-    OutdoorAmbient=Color3.fromRGB(150,170,195),
-    Brightness=2,ClockTime=14,
-    Tint=Color3.fromRGB(220,235,255),
-    Saturation=.06,Contrast=.06,
-    BloomIntensity=.35,BloomSize=10,BloomThreshold=.92,
-    RayIntensity=.05,RaySpread=.9
+local Terrain=workspace:FindFirstChildOfClass("Terrain")
+local cinematicProfile={
+    Brightness=2.08,
+    ClockTime=6.7,
+    ColorShift_Bottom=Color3.fromRGB(13,3,22),
+    ColorShift_Top=Color3.fromRGB(214,115,78),
+    Ambient=Color3.fromRGB(69,42,53),
+    OutdoorAmbient=Color3.fromRGB(82,48,83),
+    FogColor=Color3.fromRGB(126,84,116),
+    FogStart=90,
+    FogEnd=2400,
+    ExposureCompensation=.07,
+    ShadowSoftness=.18,
+    GlobalShadows=true,
+    EnvironmentSpecularScale=1,
+    EnvironmentDiffuseScale=1,
 }
-local function restore()
-    for _,obj in ipairs(created) do pcall(function()obj:Destroy()end) end
-    table.clear(created)
-    if saved then
-        for _,key in ipairs(props) do
-            local value=saved[key]
-            if value~=nil then pcall(function()Lighting[key]=value end) end
+local lightingProperties={
+    "Brightness","ClockTime","ColorShift_Bottom","ColorShift_Top",
+    "Ambient","OutdoorAmbient","FogColor","FogStart","FogEnd",
+    "ExposureCompensation","ShadowSoftness","GlobalShadows",
+    "EnvironmentSpecularScale","EnvironmentDiffuseScale"
+}
+local waterProfile={
+    WaterReflectance=.32,
+    WaterTransparency=.48,
+    WaterWaveSize=.12,
+    WaterWaveSpeed=6
+}
+local waterProperties={"WaterReflectance","WaterTransparency","WaterWaveSize","WaterWaveSpeed"}
+local originals=nil
+local createdEffects={}
+local mutedEffects={}
+local reflectiveParts={}
+local reflectivePartsSeen={}
+local shaderActive=false
+local scanElapsed=0
+local maxFloors=30
+
+local function safeRead(target,key)
+    local ok,result=pcall(function() return target[key] end)
+    if ok then return result end
+    return nil
+end
+local function safeWrite(target,key,value)
+    return pcall(function() target[key]=value end)
+end
+
+local function saveSettings()
+    local snapshot={lighting={},water={}}
+    for _,key in ipairs(lightingProperties) do
+        snapshot.lighting[key]=safeRead(Lighting,key)
+    end
+    if Terrain then
+        for _,key in ipairs(waterProperties) do
+            snapshot.water[key]=safeRead(Terrain,key)
         end
     end
-    saved=nil
-    active=false
-    UI.gui:SetAttribute("ShadersEnabled",false)
+    return snapshot
 end
-local function activate()
-    if active then return true end
-    local snapshot={}
-    for _,key in ipairs(props) do
-        local ok,val=pcall(function()return Lighting[key]end)
-        if not ok then return false end
-        snapshot[key]=val
+
+local function restoreShader()
+    shaderActive=false
+    -- Destroy only our own sky and post-processing, never the game's assets.
+    for _,effect in ipairs(createdEffects) do
+        pcall(function() effect:Destroy() end)
     end
-    saved=snapshot
-    local ok,err=pcall(function()
-        for _,key in ipairs(props) do Lighting[key]=PROFILE[key] end
-        local color=Instance.new("ColorCorrectionEffect")
-        color.Name="ShadersX_ColdColor"
-        color.TintColor=PROFILE.Tint
-        color.Saturation=PROFILE.Saturation
-        color.Contrast=PROFILE.Contrast
-        color.Brightness=0
-        color.Enabled=true
-        color.Parent=Lighting
-        created[#created+1]=color
-        local bloom=Instance.new("BloomEffect")
-        bloom.Name="ShadersX_CinematicBloom"
-        bloom.Intensity=PROFILE.BloomIntensity
-        bloom.Size=PROFILE.BloomSize
-        bloom.Threshold=PROFILE.BloomThreshold
-        bloom.Enabled=true
-        bloom.Parent=Lighting
-        created[#created+1]=bloom
-        local rays=Instance.new("SunRaysEffect")
-        rays.Name="ShadersX_CinematicSunRays"
-        rays.Intensity=PROFILE.RayIntensity
-        rays.Spread=PROFILE.RaySpread
-        rays.Enabled=true
-        rays.Parent=Lighting
-        created[#created+1]=rays
+    table.clear(createdEffects)
+
+    for _,entry in ipairs(mutedEffects) do
+        local object=entry.object
+        if object and object.Parent then
+            safeWrite(object,"Enabled",entry.enabled)
+        end
+    end
+    table.clear(mutedEffects)
+
+    for _,entry in ipairs(reflectiveParts) do
+        if entry.part and entry.part.Parent then
+            safeWrite(entry.part,"Reflectance",entry.value)
+        end
+    end
+    table.clear(reflectiveParts)
+    table.clear(reflectivePartsSeen)
+
+    if originals then
+        for key,value in pairs(originals.lighting) do
+            safeWrite(Lighting,key,value)
+        end
+        if Terrain then
+            for key,value in pairs(originals.water) do
+                safeWrite(Terrain,key,value)
+            end
+        end
+    end
+    originals=nil
+    scanElapsed=0
+    UI.gui:SetAttribute("ShadersEnabled",false)
+    UI.gui:SetAttribute("ReflectiveSurfaces",0)
+end
+
+local function muteOverpoweringEffects()
+    -- Any leftover Blur from the original third script is temporarily
+    -- disabled and restored on OFF. Giant low-threshold Bloom is also muted.
+    -- Effects created by other scripts are NOT deleted.
+    for _,effect in ipairs(Lighting:GetChildren()) do
+        local shouldMute=false
+        if effect:IsA("BlurEffect") then
+            shouldMute=effect.Enabled
+        elseif effect:IsA("BloomEffect") then
+            shouldMute=effect.Enabled
+                and (effect.Size>=55 or effect.Threshold<=.15)
+        end
+        if shouldMute then
+            mutedEffects[#mutedEffects+1]={object=effect,enabled=effect.Enabled}
+            safeWrite(effect,"Enabled",false)
+        end
+    end
+end
+
+local function addEffect(effect)
+    createdEffects[#createdEffects+1]=effect
+    effect.Parent=Lighting
+    return effect
+end
+
+local function enhanceNearbyFloors()
+    -- Roblox BasePart.Reflectance can add sky highlights on large, flat,
+    -- smooth ground pieces. It cannot render structure reflections.
+    -- Bounded local search to avoid scanning huge games every frame on mobile.
+    if not shaderActive or #reflectiveParts>=maxFloors then return end
+    local character=player.Character
+    local center=character and character:FindFirstChild("HumanoidRootPart")
+    if not center or not center:IsA("BasePart") then return end
+
+    local params=OverlapParams.new()
+    params.MaxParts=220
+    local ok,nearby=pcall(function()
+        return workspace:GetPartBoundsInRadius(center.Position,145,params)
     end)
-    if not ok then
-        restore()
-        warn("Shaders X: shader could not start: "..tostring(err))
+    if not ok or not nearby then return end
+
+    for _,part in ipairs(nearby) do
+        if #reflectiveParts>=maxFloors then break end
+        if not reflectivePartsSeen[part]
+            and part:IsA("BasePart")
+            and part.Anchored
+            and part.Transparency<.20
+            and part.Size.X>=14 and part.Size.Z>=14
+            and part.CFrame.UpVector.Y>.96
+            and (part.Material==Enum.Material.SmoothPlastic
+                or part.Material==Enum.Material.Plastic)
+            and not part:FindFirstChildOfClass("SurfaceAppearance") then
+            local previous=safeRead(part,"Reflectance")
+            if type(previous)=="number" and previous<.085 then
+                if safeWrite(part,"Reflectance",.085) then
+                    reflectivePartsSeen[part]=true
+                    reflectiveParts[#reflectiveParts+1]={part=part,value=previous}
+                end
+            end
+        end
+    end
+    UI.gui:SetAttribute("ReflectiveSurfaces",#reflectiveParts)
+end
+
+local function enableShader()
+    if shaderActive then return true end
+    originals=saveSettings()
+    local success,err=pcall(function()
+        for _,key in ipairs(lightingProperties) do
+            safeWrite(Lighting,key,cinematicProfile[key])
+        end
+        if Terrain then
+            for _,key in ipairs(waterProperties) do
+                safeWrite(Terrain,key,waterProfile[key])
+            end
+        end
+        muteOverpoweringEffects()
+
+        local sky=Instance.new("Sky")
+        sky.Name="ShadersX_SharpSunset"
+        sky.SkyboxUp="rbxassetid://323493360"
+        sky.SkyboxLf="rbxassetid://323494252"
+        sky.SkyboxBk="rbxassetid://323494035"
+        sky.SkyboxFt="rbxassetid://323494130"
+        sky.SkyboxDn="rbxassetid://323494368"
+        sky.SkyboxRt="rbxassetid://323494067"
+        sky.SunAngularSize=8
+        sky.StarCount=0
+        addEffect(sky)
+
+        local correction=Instance.new("ColorCorrectionEffect")
+        correction.Name="ShadersX_SunsetColor"
+        correction.Saturation=.06
+        correction.Contrast=.09
+        correction.TintColor=Color3.fromRGB(255,227,220)
+        correction.Brightness=0
+        correction.Enabled=true
+        addEffect(correction)
+
+        -- Unlike the source's Bloom Size=100, Threshold=0,
+        -- a small high-threshold bloom keeps brick and floor detail sharper.
+        local bloom=Instance.new("BloomEffect")
+        bloom.Name="ShadersX_SubtleBloom"
+        bloom.Intensity=.12
+        bloom.Size=20
+        bloom.Threshold=1.10
+        bloom.Enabled=true
+        addEffect(bloom)
+
+        local rays=Instance.new("SunRaysEffect")
+        rays.Name="ShadersX_SunsetRays"
+        rays.Intensity=.04
+        rays.Spread=.78
+        rays.Enabled=true
+        addEffect(rays)
+        -- No BlurEffect or DepthOfFieldEffect is created.
+    end)
+    if not success then
+        restoreShader()
+        warn("Shaders X: sunset shader could not start: "..tostring(err))
         return false
     end
-    active=true
+    shaderActive=true
     UI.gui:SetAttribute("ShadersEnabled",true)
+    UI.gui:SetAttribute("ShaderProfile","SharpSunset")
     state.burst=1
+    enhanceNearbyFloors()
     return true
 end
+
 features.shader={enabled=false}
-function features.shader:setEnabled(enabled)
-    if enabled then self.enabled=activate()
-    else restore();self.enabled=false end
+function features.shader:setEnabled(value)
+    if value then
+        self.enabled=enableShader()
+    else
+        self.enabled=false
+        restoreShader()
+    end
     return self.enabled
 end
 function features.shader:destroy()
-    self.enabled=false;restore()
+    self.enabled=false
+    restoreShader()
 end
+
+-- An occasional bounded scan keeps the subtle floor sheen nearby as you walk.
+-- This is NOT ray tracing, and does not create mirror reflections of buildings.
+connect(RunService.Heartbeat,function(dt)
+    if not shaderActive then return end
+    scanElapsed+=dt
+    if scanElapsed>=6 then
+        scanElapsed=0
+        enhanceNearbyFloors()
+    end
+end)
 
 -- Actual Reyzn X Amethyst metallic panel, animated fire and ON/OFF toggle.
 UI.panel,UI.panelFx=surface(UI.window,"AmethystPanel",
