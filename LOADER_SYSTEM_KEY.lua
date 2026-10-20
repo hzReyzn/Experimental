@@ -303,6 +303,7 @@ local function brandText(parent,name,pos,size,pixels)
         ColorSequenceKeypoint.new(1,C.light)})})
     local outline=make("UIStroke",text,{Color=C.black,Transparency=.28,Thickness=.8,ApplyStrokeMode=Enum.ApplyStrokeMode.Contextual})
     return text,metal,outline
+end
 
 -- NO GAMEPLAY CONTROLLERS ARE LOADED UNTIL AUTHORIZATION
 UI.gui=make("ScreenGui",playerGui,{Name="ReyznXKeyLoader",ResetOnSpawn=false,DisplayOrder=72,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,IgnoreGuiInset=false})
@@ -824,6 +825,136 @@ local function setSubmitBusy(busy)
         or authorized and "LAUNCH REYZN X"
         or "VERIFY & LAUNCH"
 end
+
+-- Loading/verification display: original Reyzn X surface, chrome, background,
+-- emblem, neon and fire factories, rather than a redesigned loader GUI.
+UI.keySplash=frame(UI.screen,"KeySystemLoadingScreen",
+    UDim2.fromScale(0,0),UDim2.fromScale(1,1),C.black,.07,"fixed")
+UI.keySplash.ZIndex=21
+UI.keySplash.Visible=false
+UI.keySplash.Active=true
+gradient(UI.keySplash,{C.base,C.black,C.panel},98)
+UI.keySplashPanel,UI.keySplashFX=surface(UI.keySplash,"KeySplashPanel",
+    UDim2.fromScale(.5,.5),UDim2.fromOffset(485,316),"fixed")
+UI.keySplashPanel.AnchorPoint=Vector2.new(.5,.5)
+UI.keySplashPanel.ZIndex=23
+UI.keySplashAura=UpdraftFire.new(UI.keySplash,
+    "KeySplashFlames","fixed",485,316,true,{8,4,6,4})
+UI.keySplashAura.host.AnchorPoint=Vector2.new(.5,.5)
+UI.keySplashAura.host.Position=UDim2.fromScale(.5,.5)
+UI.keySplashAura.host.ZIndex=22
+
+UI.keySplashLogo=frame(UI.keySplashPanel,"KeySplashLogoHost",
+    UDim2.new(.5,-43,0,12),UDim2.fromOffset(86,86),nil,1)
+UI.keySplashLogo.ZIndex=5
+UI.keySplashLogoNeon=EmblemNeon.new(UI.keySplashLogo)
+UI.keySplashFallback=label(UI.keySplashLogo,"XFallback","X",
+    UDim2.fromScale(0,0),UDim2.fromScale(1,1),70,C.light,Enum.Font.GothamBold)
+UI.keySplashFallback.TextXAlignment=Enum.TextXAlignment.Center
+UI.keySplashFallback.ZIndex=5
+UI.keySplashImage=imageLabel(UI.keySplashLogo,"EmblemX",
+    UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+UI.keySplashImage.ZIndex=6
+artworkImages.Emblem[#artworkImages.Emblem+1]=UI.keySplashImage
+
+UI.keySplashTitle=label(UI.keySplashPanel,"LoadingTitle",
+    "REYZN X KEY SYSTEM",UDim2.fromOffset(20,103),
+    UDim2.new(1,-40,0,33),25,C.white,OPTION_FONT)
+UI.keySplashTitle.TextXAlignment=Enum.TextXAlignment.Center
+UI.keySplashTitle.ZIndex=6
+
+UI.keySplashSubtitle=label(UI.keySplashPanel,"LoadingSubtitle",
+    "Preparing your session...",UDim2.fromOffset(20,138),
+    UDim2.new(1,-40,0,26),16,C.muted,OPTION_FONT)
+UI.keySplashSubtitle.TextXAlignment=Enum.TextXAlignment.Center
+UI.keySplashSubtitle.ZIndex=6
+
+UI.keySplashTrack=frame(UI.keySplashPanel,"LoadingTrack",
+    UDim2.new(0,25,1,-95),UDim2.new(1,-50,0,16),C.black,.04)
+corner(UI.keySplashTrack,8)
+stroke(UI.keySplashTrack,C.steel,.35,1)
+UI.keySplashTrack.ZIndex=6
+UI.keySplashFill=frame(UI.keySplashTrack,"LoadingFill",
+    UDim2.fromScale(0,0),UDim2.new(0,0,1,0),C.violet)
+round(UI.keySplashFill,8)
+gradient(UI.keySplashFill,{C.deep,C.violet,C.cyan,C.chrome},0)
+UI.keySplashFill.ZIndex=7
+UI.keySplashPercent=label(UI.keySplashPanel,"LoadingPercent","0%",
+    UDim2.new(0,25,1,-71),UDim2.new(1,-50,0,24),18,C.cyan,OPTION_FONT)
+UI.keySplashPercent.TextXAlignment=Enum.TextXAlignment.Center
+UI.keySplashPercent.ZIndex=6
+UI.keySplashCredit=label(UI.keySplashPanel,"LoadingCredit","Made By Reyzn",
+    UDim2.new(0,25,1,-42),UDim2.new(1,-50,0,24),13,C.muted,OPTION_FONT)
+UI.keySplashCredit.TextXAlignment=Enum.TextXAlignment.Center
+UI.keySplashCredit.ZIndex=6
+
+local function resizeKeySplash()
+    if not state.alive or not UI.screen then return end
+    local screen=UI.screen.AbsoluteSize
+    if screen.X<1 or screen.Y<1 then return end
+    local width=math.max(205,math.min(485,screen.X-34))
+    local height=math.max(218,math.min(316,screen.Y-30))
+    UI.keySplashPanel.Size=UDim2.fromOffset(width,height)
+    UI.keySplashAura.host.Size=UDim2.fromOffset(width,height)
+    UI.keySplashLogo.Position=UDim2.new(.5,-34,0,8)
+    UI.keySplashLogo.Size=UDim2.fromOffset(68,68)
+    UI.keySplashFallback.TextSize=60
+    UI.keySplashTitle.Position=UDim2.fromOffset(12,81)
+    UI.keySplashTitle.Size=UDim2.new(1,-24,0,30)
+    UI.keySplashTitle.TextSize=width<270 and 19 or 25
+    UI.keySplashSubtitle.Position=UDim2.fromOffset(12,112)
+    UI.keySplashSubtitle.Size=UDim2.new(1,-24,0,45)
+    UI.keySplashSubtitle.TextWrapped=true
+    UI.keySplashSubtitle.TextTruncate=Enum.TextTruncate.None
+    UI.keySplashSubtitle.TextSize=width<270 and 14 or 16
+    UI.keySplashTrack.Position=UDim2.new(0,20,1,-79)
+    UI.keySplashTrack.Size=UDim2.new(1,-40,0,14)
+    UI.keySplashPercent.Position=UDim2.new(0,20,1,-60)
+    UI.keySplashPercent.Size=UDim2.new(1,-40,0,24)
+    UI.keySplashCredit.Position=UDim2.new(0,20,1,-33)
+    UI.keySplashCredit.Size=UDim2.new(1,-40,0,22)
+end
+connect(UI.screen:GetPropertyChangedSignal("AbsoluteSize"),resizeKeySplash)
+
+local keyCountdown=false
+local countdownSerial=0
+local function startKeyCountdown(seconds,mode,after)
+    if keyCountdown or not state.alive then return false end
+    keyCountdown=true
+    countdownSerial+=1
+    local serial=countdownSerial
+    local begin=os.clock()
+    local verifying=mode=="verification"
+    UI.keySplashTitle.Text=verifying and "VERIFYING ACCESS KEY" or "REYZN X KEY SYSTEM"
+    UI.keySplashSubtitle.Text=verifying
+        and "Checking your local access key..."
+        or "Saved key detected. Loading Reyzn X..."
+    UI.keySplashPercent.Text="0%"
+    UI.keySplashFill.Size=UDim2.new(0,0,1,0)
+    UI.keySplash.Visible=true
+    UI.window.Visible=false
+    UI.launcher.Visible=false
+    UI.recovery.Visible=false
+    resizeKeySplash()
+    local heartbeat
+    heartbeat=connect(RunService.Heartbeat,function()
+        if not state.alive or serial~=countdownSerial then
+            if heartbeat then heartbeat:Disconnect() end
+            return
+        end
+        local ratio=math.clamp((os.clock()-begin)/seconds,0,1)
+        UI.keySplashFill.Size=UDim2.new(ratio,0,1,0)
+        UI.keySplashPercent.Text=string.format("%d%%",math.floor(ratio*100))
+        if ratio>=1 then
+            heartbeat:Disconnect()
+            keyCountdown=false
+            UI.keySplashSubtitle.Text="Opening Reyzn X..."
+            after()
+        end
+    end)
+    return true
+end
+
 local function launchOriginal()
     if launching or not state.alive then return end
     launching=true;setSubmitBusy(true)
@@ -848,6 +979,13 @@ local function launchOriginal()
                 if state.alive then destroyLoader() end
             end)
         else
+            UI.keySplash.Visible=false
+            UI.gui.Enabled=true
+            UI.window.Visible=true
+            UI.launcher.Visible=false
+            state.target="open"
+            UI.windowFade.Value=1
+            UI.launcherFade.Value=0
             UI.statusValue.Text="Retry"
             setKeyStatus("Launch failed. Try again.","error")
             warn("Reyzn X Key Loader: "..tostring(err))
@@ -860,8 +998,11 @@ local function launchOriginal()
     end)
 end
 local function verifyKey()
-    if launching or not state.alive then return end
-    if authorized then launchOriginal();return end
+    if launching or keyCountdown or not state.alive then return end
+    if authorized then
+        startKeyCountdown(5,"saved",launchOriginal)
+        return
+    end
     local value=UI.keyInput.Text:match("^%s*(.-)%s*$")
     if value=="" then
         setKeyStatus("Enter your access key first.","error")
@@ -882,7 +1023,7 @@ local function verifyKey()
     UI.statusValue.Text="Verified"
     setKeyStatus(saved and "Access saved on this device." or
         "Key accepted. Saving is unavailable on this executor.","success")
-    launchOriginal()
+    startKeyCountdown(3,"verification",launchOriginal)
 end
 connect(UI.keySubmit.Activated,verifyKey)
 connect(UI.keyInput.FocusLost,function(enterPressed)
@@ -1238,8 +1379,12 @@ refreshAlpha()
 authorized=readAuthorization() or env.ReyznXKeySessionAuthorized==true
 saved=readAuthorization()
 if authorized then
-    UI.gui.Enabled=false
-    task.defer(function() if state.alive then launchOriginal() end end)
+    -- Deliberately show the Key System for FIVE full seconds before launching.
+    -- Keeping ScreenGui enabled is necessary for the loading screen to render.
+    UI.statusValue.Text="Saved"
+    task.defer(function()
+        if state.alive then startKeyCountdown(5,"saved",launchOriginal) end
+    end)
 end
 connect(RunService.Heartbeat,function(dt)
     if not state.alive then return end
@@ -1256,6 +1401,13 @@ connect(RunService.Heartbeat,function(dt)
     state.burst=math.max(0,state.burst-elapsed*3)
     local p=state.phase
     if not UI.gui.Enabled then return end
+    if UI.keySplash.Visible then
+        UI.keySplashFX.inward:update(p,state.burst)
+        UI.keySplashFX.neon:update(p,.13)
+        UI.keySplashFX.beamGradient.Offset=Vector2.new(math.sin(p*.24)*.36,0)
+        UI.keySplashAura:update(p,state.burst)
+        UI.keySplashLogoNeon:update(p,.08)
+    end
     if UI.launcher.Visible then
         UI.launcherAura:update(p,state.burst)
         local cycle=p%5.1
@@ -1292,6 +1444,7 @@ connect(RunService.Heartbeat,function(dt)
         UI.rFallback.Visible=UI.launcherImage.Image=="" or not UI.launcherImage.IsLoaded
         UI.recoveryFallback.Visible=UI.recoveryImage.Image=="" or not UI.recoveryImage.IsLoaded
         UI.xFallback.Visible=UI.xImage.Image=="" or not UI.xImage.IsLoaded
+        UI.keySplashFallback.Visible=UI.keySplashImage.Image=="" or not UI.keySplashImage.IsLoaded
         for name,control in pairs(controlArtwork) do
             control.fallback.Visible=control.image.Image=="" or not control.image.IsLoaded
         end
