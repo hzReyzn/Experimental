@@ -1,632 +1,1304 @@
---[[
-    REYZN X | LOADER SYSTEM KEY
-    Standalone local-key prototype, styled after Reyzn X Experimental.
-
-    IMPORTANT: This is NOT secure server-side licensing. Anyone with the
-    published source can read the demonstration key or bypass a local gate.
-
-    First-time key: reyzn-x-0809-2026
-    Save file: ReyznX_KeyAccess_v1.txt (where executor supports files)
-    Target: Reyzn X original, hzReyzn/Ghislain
-]]
-
+-- Reyzn X | Made By Reyzn
+-- Key access loader with copied Reyzn X Experimental visual components.
+-- The original Hub is fetched only after local key validation.
 local Players = game:GetService("Players")
-local UserInputService = game:GetService("UserInputService")
+local Input = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
+local ContentProvider = game:GetService("ContentProvider")
 local player = Players.LocalPlayer
 if not player then return end
+local startedAt = os.clock()
 local playerGui = player:WaitForChild("PlayerGui")
-
-local KEY = "reyzn-x-0809-2026"
-local SAVE_FILE = "ReyznX_KeyAccess_v1.txt"
-local HUB_URL = "https://raw.githubusercontent.com/hzReyzn/Ghislain/main/Reyzn%20X.lua"
-local env = (type(getgenv) == "function" and getgenv()) or _G
-
-if type(env.ReyznXKeyLoaderStop) == "function" then
-    pcall(env.ReyznXKeyLoaderStop)
+-- Retire every previous instance owned by this Hub, including notices that were
+-- still visible. FindFirstChild alone can leave a duplicate old GUI running.
+for _,previous in ipairs(playerGui:GetChildren())do
+    if previous.Name=="ReyznXKeyLoader" then previous:Destroy() end
 end
 
+-- Public version changes ONLY at the owner's explicit request.
+local VERSION = "1.0"
+local BUILD = "exact-ui-key-gate-20261020"
+-- Roblox Creator Store: Rajdhani, published by Roblox. Use FontFace, not
+-- an invented Enum.Font entry. The brand and credit retain their own fonts.
+local OPTION_FONT = Font.new("rbxassetid://12187375422",Enum.FontWeight.SemiBold,Enum.FontStyle.Normal)
+local ICON_TRANSPARENCY, BACKGROUND_TRANSPARENCY = .85, .83
+local VFX_RATE = 60 -- Ultra High is fixed; no automatic quality reduction.
 local C = {
-    obsidian = Color3.fromRGB(8, 8, 13),
-    deep = Color3.fromRGB(13, 12, 20),
-    panel = Color3.fromRGB(23, 20, 33),
-    metallic = Color3.fromRGB(66, 60, 83),
-    violet = Color3.fromRGB(159, 103, 243),
-    amethyst = Color3.fromRGB(117, 58, 205),
-    pink = Color3.fromRGB(239, 104, 217),
-    cyan = Color3.fromRGB(135, 213, 255),
-    silver = Color3.fromRGB(222, 222, 235),
-    white = Color3.fromRGB(248, 246, 255),
-    muted = Color3.fromRGB(171, 162, 190),
-    green = Color3.fromRGB(136, 229, 187),
-    red = Color3.fromRGB(255, 131, 158),
+    base=Color3.fromRGB(10,10,15), panel=Color3.fromRGB(16,15,23),
+    black=Color3.fromRGB(8,8,12), steel=Color3.fromRGB(71,68,85),
+    silver=Color3.fromRGB(217,219,233), white=Color3.fromRGB(245,244,251),
+    muted=Color3.fromRGB(184,181,201), line=Color3.fromRGB(66,59,85),
+    violet=Color3.fromRGB(157,103,239), light=Color3.fromRGB(213,181,255),
+    deep=Color3.fromRGB(60,31,99), green=Color3.fromRGB(132,225,179), ice=Color3.fromRGB(180,207,255),
+    rose=Color3.fromRGB(212,152,219), chrome=Color3.fromRGB(235,237,247),
+    pink=Color3.fromRGB(245,92,202), orchid=Color3.fromRGB(192,114,255),
+    cyan=Color3.fromRGB(141,220,255),
 }
-local FONT = Font.new("rbxassetid://12187375422", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal)
-local running, launching, authorized = true, false, false
-local connections, activeTweens = {}, {}
-local gui
-
-local function instance(class, parent, properties)
-    local object = Instance.new(class)
-    for property, value in pairs(properties or {}) do object[property] = value end
-    object.Parent = parent
-    return object
-end
+local state = {alive=true, target="open", page="Home", paneOpen=true,
+    lastSecond=-1, phase=0, budget=0, burst=0, finishAt=0, launcherMoved=false}
+local UI, connections, threads, tweens = {}, {}, {}, {}
+local features = {}
+local scopes, alphaEntries, alphaLookup = {}, {}, {}
+local factors = {window=0, pane=0, page=0, launcher=0, notification=0, disaster=0, fps=0, fixed=1}
 
 local function connect(signal, callback)
-    local link = signal:Connect(function(...)
-        if running then callback(...) end
-    end)
-    connections[#connections + 1] = link
-    return link
+    local c = signal:Connect(function(...) if state.alive then callback(...) end end)
+    connections[#connections+1] = c
+    return c
 end
-
-local function corner(object, radius)
-    return instance("UICorner", object, {CornerRadius = UDim.new(0, radius)})
+local function spawn(callback)
+    local thread
+    thread = task.defer(function() callback(); threads[thread]=nil end)
+    threads[thread] = true
 end
-
-local function stroke(object, color, transparency, thickness)
-    return instance("UIStroke", object, {
-        ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-        Color = color, Transparency = transparency, Thickness = thickness or 1
-    })
+-- Transparency is composed from immutable base values. Transitions never sample
+-- a half-faded frame, so repeated/reversed animations cannot progressively dim it.
+local function registerAlpha(o, property, base, scope)
+    local entry={object=o, property=property, base=base, scope=scope}
+    alphaEntries[#alphaEntries+1]=entry
+    alphaLookup[o]=alphaLookup[o] or {}; alphaLookup[o][property]=entry
+    o[property]=1-(1-base)*(factors[scope] or 1)
 end
-
-local function gradient(object, colors, rotation)
-    local stops = {}
-    for i, color in ipairs(colors) do
-        stops[i] = ColorSequenceKeypoint.new((i - 1) / (#colors - 1), color)
+local function alpha(o, property, base)
+    local entry=alphaLookup[o] and alphaLookup[o][property]
+    if entry then
+        entry.base=base; o[property]=1-(1-base)*(factors[entry.scope] or 1)
+    else o[property]=base end
+end
+local function refreshAlpha()
+    factors.window=UI.windowFade.Value
+    factors.pane=factors.window*UI.paneProgress.Value
+    factors.page=factors.pane*UI.pageFade.Value
+    factors.launcher=UI.launcherFade.Value
+    factors.notification=UI.toastProgress and UI.toastProgress.Value or 0
+    factors.disaster=UI.disasterProgress and UI.disasterProgress.Value or 0
+    factors.fps=UI.fpsProgress and UI.fpsProgress.Value or 0
+    for _,entry in ipairs(alphaEntries) do
+        entry.object[entry.property]=1-(1-entry.base)*(factors[entry.scope] or 1)
     end
-    return instance("UIGradient", object, {
-        Color = ColorSequence.new(stops), Rotation = rotation or 90
-    })
 end
-
-local function frame(parent, name, color, pos, size, transparency)
-    return instance("Frame", parent, {
-        Name = name, BackgroundColor3 = color, BackgroundTransparency = transparency or 0,
-        BorderSizePixel = 0, Position = pos, Size = size
-    })
+local function make(class, parent, props, scope)
+    local o=Instance.new(class)
+    for k,v in pairs(props or {}) do o[k]=v end
+    if o:IsA("GuiObject") then o.BorderSizePixel=0; o.AutoLocalize=false end
+    scopes[o]=scope or scopes[parent] or "fixed"
+    o.Parent=parent
+    if o:IsA("GuiObject") then
+        registerAlpha(o,"BackgroundTransparency",o.BackgroundTransparency,scopes[o])
+        if o:IsA("TextLabel") or o:IsA("TextButton") then
+            o.TextStrokeTransparency=1
+            registerAlpha(o,"TextTransparency",o.TextTransparency,scopes[o])
+        end
+        if o:IsA("ImageLabel") or o:IsA("ImageButton") then
+            registerAlpha(o,"ImageTransparency",o.ImageTransparency,scopes[o])
+        end
+        if o:IsA("ScrollingFrame") then registerAlpha(o,"ScrollBarImageTransparency",o.ScrollBarImageTransparency,scopes[o]) end
+    elseif o:IsA("UIStroke") then registerAlpha(o,"Transparency",o.Transparency,scopes[o]) end
+    return o
 end
+local function tween(o, seconds, props)
+    if not state.alive then return end
+    if tweens[o] then tweens[o]:Cancel() end
+    local t=TweenService:Create(o,TweenInfo.new(seconds,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),props)
+    tweens[o]=t; t:Play()
+end
+local function corner(o,r) return make("UICorner",o,{CornerRadius=UDim.new(0,r or 12)}) end
+local function stroke(o,color,opacity,width)
+    return make("UIStroke",o,{Color=color or C.line,Transparency=opacity or 0,Thickness=width or 1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+end
+local function gradient(o,colors,rotation)
+    local keys={}
+    for i,color in ipairs(colors) do keys[i]=ColorSequenceKeypoint.new((i-1)/(#colors-1),color) end
+    return make("UIGradient",o,{Color=ColorSequence.new(keys),Rotation=rotation or 90})
+end
+local function fadeGradient(g)
+    g.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(.48,.08),NumberSequenceKeypoint.new(.52,.08),NumberSequenceKeypoint.new(1,1)})
+end
+local function frame(parent,name,pos,size,color,transparency,scope)
+    return make("Frame",parent,{Name=name,Position=pos,Size=size,BackgroundColor3=color or C.panel,BackgroundTransparency=transparency or 0},scope)
+end
+local function label(parent,name,text,pos,size,pixels,color,font)
+    local o=make("TextLabel",parent,{Name=name,Text=text,Position=pos,Size=size,BackgroundTransparency=1,
+        TextColor3=color or C.white,TextSize=pixels or 14,Font=font~=OPTION_FONT and font or Enum.Font.GothamMedium,
+        TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,TextTruncate=Enum.TextTruncate.AtEnd})
+    if font==OPTION_FONT then o.FontFace=OPTION_FONT end
+    return o
+end
+local function imageLabel(parent,name,pos,size)
+    return make("ImageLabel",parent,{Name=name,Image="",Position=pos,Size=size,BackgroundTransparency=1,ScaleType=Enum.ScaleType.Fit})
+end
+local paths={
+    crown={{{3,7},{6,17},{18,17},{21,7},{16,11},{12,3},{8,11},{3,7}},{{6,21},{18,21}}},
+    home={{{3,11},{12,3},{21,11}},{{6,9},{6,21},{10,21},{10,15},{14,15},{14,21},{18,21},{18,9}}},
+    cube={{{12,2},{22,7},{22,18},{12,23},{2,18},{2,7},{12,2}},{{2,7},{12,12},{22,7}},{{12,12},{12,23}}},
+    spark={{{12,2},{15,9},{22,12},{15,15},{12,22},{9,15},{2,12},{9,9},{12,2}}},
+    code={{{8,6},{2,12},{8,18}},{{16,6},{22,12},{16,18}},{{14,3},{10,21}}},
+    settings={{{4,6},{20,6}},{{4,12},{20,12}},{{4,18},{20,18}},{{9,3},{9,9}},{{16,9},{16,15}},{{8,15},{8,21}}},
+    arrow={{{4,12},{20,12}},{{14,6},{20,12},{14,18}}},
+    close={{{6,6},{18,18}},{{18,6},{6,18}}},
+    minimize={{{5,16},{19,16}}}, fold={{{14,5},{7,12},{14,19}}},
+}
+local artworkImages={IconHome={},IconMain={},IconVisuals={},IconScripts={},IconSettings={},Background={},Emblem={}}
+local iconSprites={}
+local iconAssets={home="IconHome",cube="IconMain",spark="IconVisuals",code="IconScripts",settings="IconSettings"}
+local function icon(parent,kind,pos,size,color)
+    local host=frame(parent,"Icon_"..kind,pos,UDim2.fromOffset(size,size),nil,1)
+    local fallback={}
+    for _,path in ipairs(paths[kind]) do
+        for i=1,#path-1 do
+            local a,b=path[i],path[i+1]; local dx,dy=(b[1]-a[1])*size/24,(b[2]-a[2])*size/24
+            local line=frame(host,"Line",UDim2.fromOffset((a[1]+b[1])*size/48,(a[2]+b[2])*size/48),UDim2.fromOffset(math.sqrt(dx*dx+dy*dy),1.7),color or C.silver)
+            line.AnchorPoint=Vector2.new(.5,.5); line.Rotation=math.deg(math.atan2(dy,dx)); corner(line,2)
+            fallback[#fallback+1]=line
+        end
+    end
+    local asset=iconAssets[kind]
+    if asset then
+        local artwork=imageLabel(host,"OptionArtwork",UDim2.fromScale(.5,.5),UDim2.fromScale(1.42,1.42))
+        artwork.AnchorPoint=Vector2.new(.5,.5);artwork.Active=false
+        alpha(artwork,"ImageTransparency",ICON_TRANSPARENCY)
+        artworkImages[asset][#artworkImages[asset]+1]=artwork
+        iconSprites[#iconSprites+1]={image=artwork,fallback=fallback,key=asset}
+    end
+    return host
+end
+local function tintIcon(host,color)
+    for _,line in ipairs(host:GetChildren()) do if line:IsA("Frame") then line.BackgroundColor3=color end end
+end
+local metallicColors={Color3.fromRGB(39,37,49),Color3.fromRGB(23,22,32),C.black,Color3.fromRGB(25,20,36)}
+-- VFX modules share the existing lifecycle and alpha compositor. No downloaded
+-- modules, global render bindings, or full-window CanvasGroup render targets.
+local VFX={images={},buttons={},reflections={items={},nextAt=5,serial=0}}
 
-local function label(parent, name, content, pos, size, fontSize, color, alignment)
-    local item = instance("TextLabel", parent, {
-        Name = name, Text = content, Position = pos, Size = size,
-        BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
-        TextColor3 = color, TextSize = fontSize,
-        TextXAlignment = alignment or Enum.TextXAlignment.Left,
-        TextYAlignment = Enum.TextYAlignment.Center,
-        TextTruncate = Enum.TextTruncate.AtEnd
-    })
-    item.FontFace = FONT
+-- Shared, built-in cyan accent. One translucent wash and the existing metallic
+-- stroke move together; gradients are allocated once, never rebuilt each frame.
+-- Independent phases keep navigation, surfaces and the toast from flashing in sync.
+local NeonFlow={};NeonFlow.__index=NeonFlow
+function NeonFlow.new(parent,name,radius,seed,edge)
+    local fill=frame(parent,name,UDim2.fromOffset(1,1),UDim2.new(1,-2,1,-2),Color3.new(1,1,1),1)
+    fill.Active=false;fill.ZIndex=3;corner(fill,radius)
+    local wash=gradient(fill,{C.deep,C.violet,C.cyan,C.ice,C.deep},26)
+    wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),
+        NumberSequenceKeypoint.new(.2,.75),NumberSequenceKeypoint.new(.48,.04),
+        NumberSequenceKeypoint.new(.70,.52),NumberSequenceKeypoint.new(1,1)})
+    return setmetatable({fill=fill,wash=wash,edge=edge,seed=seed},NeonFlow)
+end
+function NeonFlow:update(time,strength)
+    local phase=time*.48+self.seed
+    self.wash.Offset=Vector2.new(math.sin(phase)*.42,math.cos(phase*.67)*.07)
+    self.wash.Rotation=26+math.sin(phase*.73)*8
+    if self.edge then
+        self.edge.Offset=Vector2.new(math.sin(phase+.8)*.28,0)
+        self.edge.Rotation=24+math.sin(phase*.61)*15
+    end
+    alpha(self.fill,"BackgroundTransparency",1-strength)
+end
+local function shown(object)
+    while object and object~=UI.gui do
+        if object:IsA("GuiObject") and not object.Visible then return false end
+        object=object.Parent
+    end
+    return object~=nil
+end
+local function addReflection(object,light,strength)
+    local item={object=object,light=light,strength=strength or .1}
+    VFX.reflections.items[#VFX.reflections.items+1]=item
+    alpha(object,"BackgroundTransparency",1)
     return item
 end
-
-local function tween(object, duration, props)
-    if not running then return end
-    if activeTweens[object] then activeTweens[object]:Cancel() end
-    local t = TweenService:Create(
-        object, TweenInfo.new(duration, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props
-    )
-    activeTweens[object] = t
-    t:Play()
-    return t
+function VFX.reflections:request(item)
+    if not item or not shown(item.object) then return end
+    if self.active then alpha(self.active.object,"BackgroundTransparency",1) end
+    self.active=item;self.elapsed=0;self.nextAt=state.phase+6.5
 end
-
-local function savedAccess()
-    if type(isfile) ~= "function" or type(readfile) ~= "function" then return false end
-    local ok, raw = pcall(function()
-        if isfile(SAVE_FILE) then return readfile(SAVE_FILE) end
-    end)
-    return ok and type(raw) == "string" and raw == KEY
-end
-
-local function saveAccess()
-    if type(writefile) ~= "function" then return false end
-    return pcall(writefile, SAVE_FILE, KEY)
-end
-
-local function shutdown()
-    if not running then return end
-    running = false
-    for _, link in ipairs(connections) do link:Disconnect() end
-    table.clear(connections)
-    for _, active in pairs(activeTweens) do active:Cancel() end
-    table.clear(activeTweens)
-    if env.ReyznXKeyLoaderStop == shutdown then env.ReyznXKeyLoaderStop = nil end
-    if gui then gui:Destroy() end
-end
-env.ReyznXKeyLoaderStop = shutdown
-
--- Standalone loader: no edits to either Reyzn X repository are needed.
-gui = instance("ScreenGui", playerGui, {
-    Name = "ReyznXKeyLoader", ResetOnSpawn = false, IgnoreGuiInset = true,
-    DisplayOrder = 150, ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-})
-
-local root = frame(gui, "ReyznKeyWindow", C.deep,
-    UDim2.fromScale(.5, .5), UDim2.fromOffset(730, 410), 1)
-root.AnchorPoint = Vector2.new(.5, .5)
-root.Active = true
-local rootScale = instance("UIScale", root, {Scale = 1})
-
-local aura = frame(root, "VioletAura", C.amethyst,
-    UDim2.fromOffset(-8, -8), UDim2.new(1, 16, 1, 16), .91)
-corner(aura, 22)
-local auraStroke = stroke(aura, C.violet, .6, 2)
-local auraGradient = gradient(auraStroke, {C.amethyst, C.cyan, C.silver, C.pink, C.amethyst}, 25)
-
-local shell = frame(root, "MetallicWindow", C.deep,
-    UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1))
-corner(shell, 16)
-gradient(shell, {Color3.fromRGB(27, 25, 39), C.obsidian, C.panel}, 95)
-local shellStroke = stroke(shell, C.silver, .28, 1.2)
-local shellChrome = gradient(shellStroke, {C.metallic, C.cyan, C.silver, C.violet, C.obsidian}, 25)
-
-local side = frame(shell, "AmethystDock", C.obsidian,
-    UDim2.fromOffset(3, 3), UDim2.fromOffset(203, 404))
-corner(side, 13)
-gradient(side, {Color3.fromRGB(35, 26, 53), C.obsidian, Color3.fromRGB(22, 17, 34)}, 115)
-local sideStroke = stroke(side, C.metallic, .34)
-local sideChrome = gradient(sideStroke, {C.violet, C.silver, C.cyan, C.amethyst}, 25)
-
-local crown = label(side, "Crown", "✦", UDim2.fromOffset(17, 14),
-    UDim2.fromOffset(28, 32), 30, C.violet)
-local brand = label(side, "Brand", "REYZN X", UDim2.fromOffset(47, 14),
-    UDim2.new(1, -60, 0, 32), 27, C.white)
-local sideLine = frame(side, "Divider", C.violet,
-    UDim2.fromOffset(15, 56), UDim2.new(1, -30, 0, 2), .25)
-gradient(sideLine, {C.obsidian, C.violet, C.cyan, C.obsidian}, 0)
-
-local emblemBack = frame(side, "EmblemHalo", C.amethyst,
-    UDim2.fromOffset(30, 91), UDim2.fromOffset(143, 143), .94)
-corner(emblemBack, 23)
-local emblemBorder = stroke(emblemBack, C.violet, .30, 2)
-local emblemGradient = gradient(emblemBorder, {C.pink, C.violet, C.cyan, C.silver, C.pink}, 20)
-local emblem = label(emblemBack, "Emblem", "X", UDim2.fromScale(0, 0),
-    UDim2.fromScale(1, 1), 102, C.light, Enum.TextXAlignment.Center)
-emblem.FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Heavy, Enum.FontStyle.Normal)
-
-local sideBottomLine = frame(side, "LowerDivider", C.violet,
-    UDim2.fromOffset(17, 265), UDim2.new(1, -34, 0, 1), .26)
-gradient(sideBottomLine, {C.obsidian, C.violet, C.cyan, C.obsidian}, 0)
-local accessLabel = label(side, "AccessLabel", "SECURE ACCESS",
-    UDim2.fromOffset(17, 278), UDim2.new(1, -34, 0, 29), 20, C.white)
-local versionLabel = label(side, "VersionLabel", "KEY SYSTEM  /  V1",
-    UDim2.fromOffset(17, 308), UDim2.new(1, -34, 0, 23), 14, C.muted)
-local credit = label(side, "Credit", "Made By Reyzn",
-    UDim2.fromOffset(17, 375), UDim2.new(1, -34, 0, 24), 14, C.light)
-
-local panel = frame(shell, "AccessPanel", C.panel,
-    UDim2.fromOffset(216, 3), UDim2.fromOffset(511, 404))
-corner(panel, 14)
-gradient(panel, {C.panel, C.deep, C.obsidian}, 95)
-local panelStroke = stroke(panel, C.metallic, .42, 1)
-local panelChrome = gradient(panelStroke, {C.metallic, C.violet, C.silver, C.cyan}, 22)
-local beam = frame(panel, "ChromeReflection", C.silver,
-    UDim2.fromOffset(18, 3), UDim2.new(1, -36, 0, 2), .32)
-corner(beam, 2)
-local beamGradient = gradient(beam, {C.amethyst, C.violet, C.cyan, C.silver, C.amethyst}, 0)
-
-local eyebrow = label(panel, "Eyebrow", "REYZN X  /  AUTHENTICATION",
-    UDim2.fromOffset(30, 24), UDim2.new(1, -110, 0, 22), 15, C.cyan)
-local title = label(panel, "Title", "ACCESS CONTROL",
-    UDim2.fromOffset(30, 53), UDim2.new(1, -60, 0, 48), 34, C.white)
-local subtitle = label(panel, "Subtitle", "Verify your key to launch Reyzn X.",
-    UDim2.fromOffset(30, 105), UDim2.new(1, -60, 0, 30), 17, C.muted)
-
-local inputFace = frame(panel, "KeyInputSurface", C.obsidian,
-    UDim2.fromOffset(30, 158), UDim2.new(1, -60, 0, 59), .05)
-corner(inputFace, 11)
-local inputStroke = stroke(inputFace, C.metallic, .25, 1.1)
-local inputChrome = gradient(inputStroke, {C.amethyst, C.violet, C.silver, C.cyan}, 20)
-local keyIcon = label(inputFace, "KeyIcon", "✦", UDim2.fromOffset(14, 10),
-    UDim2.fromOffset(28, 38), 27, C.light)
-local input = instance("TextBox", inputFace, {
-    Name = "EnterAccessKey", Position = UDim2.fromOffset(53, 7),
-    Size = UDim2.new(1, -65, 1, -14), BackgroundTransparency = 1,
-    Text = "", PlaceholderText = "ENTER YOUR ACCESS KEY",
-    PlaceholderColor3 = Color3.fromRGB(126, 112, 144),
-    TextColor3 = C.white, TextSize = 20, Font = Enum.Font.GothamMedium,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    TextYAlignment = Enum.TextYAlignment.Center,
-    ClearTextOnFocus = false, MultiLine = false,
-    TextTruncate = Enum.TextTruncate.AtEnd,
-})
-input.FontFace = FONT
-
-local button = instance("TextButton", panel, {
-    Name = "VerifyAndLaunch", Text = "", AutoButtonColor = false,
-    Position = UDim2.fromOffset(30, 232), Size = UDim2.new(1, -60, 0, 57),
-    BackgroundColor3 = C.amethyst, BorderSizePixel = 0,
-    Active = true, Selectable = true,
-})
-corner(button, 11)
-gradient(button, {Color3.fromRGB(64, 37, 109), Color3.fromRGB(115, 64, 187), Color3.fromRGB(69, 43, 124)}, 16)
-local buttonStroke = stroke(button, C.light, .22, 1.2)
-local buttonChrome = gradient(buttonStroke, {C.violet, C.cyan, C.silver, C.pink, C.violet}, 24)
-local buttonScale = instance("UIScale", button, {Scale = 1})
-local buttonText = label(button, "Caption", "VERIFY & LAUNCH",
-    UDim2.fromOffset(10, 0), UDim2.new(1, -20, 1, 0),
-    22, C.white, Enum.TextXAlignment.Center)
-buttonText.Active = false
-
-local status = label(panel, "Status", "Enter your access key to continue.",
-    UDim2.fromOffset(30, 295), UDim2.new(1, -60, 0, 43), 16, C.muted)
-status.TextWrapped = true
-status.TextTruncate = Enum.TextTruncate.None
-local footerLine = frame(panel, "FooterDivider", C.metallic,
-    UDim2.fromOffset(30, 351), UDim2.new(1, -60, 0, 1), .30)
-gradient(footerLine, {C.obsidian, C.violet, C.silver, C.obsidian}, 0)
-local footer = label(panel, "Footer", "✦  REMEMBER THIS DEVICE",
-    UDim2.fromOffset(30, 363), UDim2.new(1, -60, 0, 23), 14, C.light)
-
-local minimize = instance("TextButton", panel, {
-    Name = "Minimize", BackgroundTransparency = 1,
-    Position = UDim2.new(1, -75, 0, 16), Size = UDim2.fromOffset(27, 26),
-    Text = "−", Font = Enum.Font.GothamBold, TextSize = 26, TextColor3 = C.silver,
-})
-local close = instance("TextButton", panel, {
-    Name = "Close", BackgroundTransparency = 1,
-    Position = UDim2.new(1, -44, 0, 16), Size = UDim2.fromOffset(27, 26),
-    Text = "×", Font = Enum.Font.GothamBold, TextSize = 24, TextColor3 = C.silver,
-})
-local launcher = instance("TextButton", gui, {
-    Name = "KeyLauncher", Visible = false, BackgroundColor3 = C.obsidian,
-    BorderSizePixel = 0, Text = "R", Font = Enum.Font.GothamBold,
-    TextSize = 32, TextColor3 = C.light, AutoButtonColor = false,
-    Position = UDim2.new(0, 18, .5, -30), Size = UDim2.fromOffset(62, 62),
-})
-corner(launcher, 16)
-local launcherStroke = stroke(launcher, C.light, .25, 1.4)
-local launcherGradient = gradient(launcherStroke, {C.amethyst, C.cyan, C.silver, C.pink}, 22)
-
-local sparks = {}
-for i = 1, 12 do
-    local angle = i * 2.39996
-    local dot = frame(emblemBack, "GlowParticle" .. i,
-        i % 3 == 0 and C.pink or C.cyan,
-        UDim2.fromScale(.5 + .39 * math.cos(angle), .5 + .39 * math.sin(angle)),
-        UDim2.fromOffset(i % 3 == 0 and 4 or 2, i % 3 == 0 and 4 or 2), .20)
-    dot.AnchorPoint = Vector2.new(.5, .5)
-    corner(dot, 5)
-    sparks[#sparks + 1] = {frame = dot, angle = angle, phase = i * .55}
-end
-
--- Optional use of the original artwork. The UI works with fallback vector/text
--- elements when custom asset and file functions are not supported.
-local function tryArtwork(image, url, filename, format)
-    local customAsset = getcustomasset or getsynasset
-    if type(customAsset) ~= "function" or type(writefile) ~= "function" then return end
-    task.spawn(function()
-        local function valid(bytes)
-            if type(bytes) ~= "string" then return false end
-            if format == "png" then return bytes:sub(1, 8) == "\137PNG\13\10\26\10" end
-            return bytes:sub(1, 3) == "\255\216\255"
+function VFX.reflections:update(dt)
+    local item=self.active
+    if item then
+        self.elapsed+=dt
+        local t=math.min(1,self.elapsed/.95)
+        if not shown(item.object) or t>=1 then
+            alpha(item.object,"BackgroundTransparency",1);self.active=nil
+        else
+            -- Only ONE diagonal highlight is active, regardless of hover spam.
+            item.light.Offset=Vector2.new(-1.15+2.3*t,0)
+            alpha(item.object,"BackgroundTransparency",1-math.sin(t*math.pi)^2*item.strength)
         end
-        local bytes
-        if type(isfile) == "function" and type(readfile) == "function" then
-            local ok, result = pcall(function()
-                if isfile(filename) then return readfile(filename) end
-            end)
-            if ok and valid(result) then bytes = result end
+    elseif state.phase>=self.nextAt and state.target=="open" then
+        self.nextAt=state.phase+7.5
+        for _=1,#self.items do
+            self.serial=self.serial%#self.items+1
+            local candidate=self.items[self.serial]
+            if shown(candidate.object) then self:request(candidate);break end
         end
-        if not bytes then
-            local ok, result = pcall(function() return game:HttpGet(url) end)
-            if not ok or not valid(result) then return end
-            if not pcall(writefile, filename, result) then return end
-        end
-        local ok, uri = pcall(customAsset, filename)
-        if running and ok and type(uri) == "string" and uri ~= "" then
-            image.Image = uri
-            if image.Name == "EmblemArtwork" then emblem.Visible = false end
+    end
+end
+local buttons=VFX.buttons
+local function updateButtonLight(record)
+    local selected=record.selection.Value
+    local energy=record.energy.Value
+    alpha(record.selectionWash,"BackgroundTransparency",1-selected*.17)
+    alpha(record.edge,"Transparency",.58-selected*.32-energy*.18)
+    alpha(record.lip,"BackgroundTransparency",.84-selected*.19-energy*.18)
+end
+local function button(parent,name,pos,size)
+    local b=make("TextButton",parent,{Name=name,Text="",Position=pos,Size=size,BackgroundTransparency=1,AutoButtonColor=false,Selectable=true})
+    local face=frame(b,"MetalFace",UDim2.fromScale(.5,.5),UDim2.fromScale(1,1),Color3.new(1,1,1))
+    face.AnchorPoint=Vector2.new(.5,.5);corner(face,10)
+    local scale=make("UIScale",face,{Name="PressScale",Scale=1})
+    local wash=gradient(face,metallicColors,108)
+    local selectedWash=frame(face,"SelectionWash",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1),1)
+    corner(selectedWash,10);local selectedGradient=gradient(selectedWash,{C.cyan,C.deep,C.violet},110)
+    local edge=stroke(face,Color3.new(1,1,1),.58,1)
+    local edgeGradient=gradient(edge,{C.steel,C.cyan,C.silver,C.deep,C.violet},34)
+    local neon=NeonFlow.new(face,"OptionNeon",9,#buttons*1.17,edgeGradient)
+    neon.fill.ZIndex=1
+    local lip=frame(face,"MetalLip",UDim2.fromOffset(11,1),UDim2.new(1,-22,0,1),C.chrome,.84)
+    local lipGradient=gradient(lip,{C.violet,C.cyan,C.chrome},0);fadeGradient(lipGradient)
+    local sheen=frame(face,"Sheen",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),C.white,1)
+    corner(sheen,9); local light=gradient(sheen,{C.cyan,C.white,C.light},25); fadeGradient(light)
+    lip.ZIndex=2;sheen.ZIndex=2
+    local record={button=b,face=face,scale=scale,edge=edge,wash=wash,sheen=sheen,light=light,lip=lip,
+        selectionWash=selectedWash,selectedGradient=selectedGradient,neon=neon,hover=false,selected=false,pressed=false,
+        energy=make("NumberValue",b,{Name="InteractionLight",Value=0}),
+        selection=make("NumberValue",b,{Name="SelectionBlend",Value=0})}
+    record.reflection=addReflection(sheen,light,.13)
+    buttons[#buttons+1]=record
+    connect(record.energy.Changed,function() updateButtonLight(record) end)
+    connect(record.selection.Changed,function() updateButtonLight(record) end)
+    connect(b.MouseEnter,function() record.hover=true;tween(record.energy,.2,{Value=.65});VFX.reflections:request(record.reflection) end)
+    connect(b.MouseLeave,function() record.hover=false;if not record.pressed then tween(record.energy,.28,{Value=0}) end end)
+    connect(b.InputBegan,function(input)
+        if record.pressed then return end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            record.pressed=true;record.pointer=input
+            tween(scale,.09,{Scale=.977});tween(record.energy,.12,{Value=1})
+            VFX.reflections:request(record.reflection)
         end
     end)
+    connect(b.Activated,function() VFX.reflections:request(record.reflection) end)
+    return b,record
 end
-
-local artwork = instance("ImageLabel", emblemBack, {
-    Name = "EmblemArtwork", Image = "", BackgroundTransparency = 1,
-    Position = UDim2.fromScale(0, 0), Size = UDim2.fromScale(1, 1),
-    ScaleType = Enum.ScaleType.Fit,
-})
-artwork.ZIndex = 4
-tryArtwork(artwork,
-    "https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/emblem-x-v1.png",
-    "ReyznX-Key-Emblem.png", "png")
-
-local function notice(message, kind)
-    if not running then return end
-    status.Text = message
-    status.TextColor3 = kind == "success" and C.green
-        or kind == "error" and C.red
-        or kind == "loading" and C.cyan or C.muted
+local function releaseButtons(input,force)
+    for _,record in ipairs(buttons) do
+        if record.pressed and (force or input==record.pointer or
+            (record.pointer.UserInputType==Enum.UserInputType.MouseButton1 and input.UserInputType==Enum.UserInputType.MouseButton1)) then
+            record.pressed=false;record.pointer=nil
+            tween(record.scale,.22,{Scale=1});tween(record.energy,.28,{Value=force and 0 or (record.hover and .65 or 0)})
+        end
+    end
 end
+connect(Input.InputEnded,function(input) releaseButtons(input,false) end)
+connect(Input.WindowFocusReleased,function() releaseButtons(nil,true) end)
 
-local function layout()
-    if not running then return end
-    local camera = workspace.CurrentCamera
-    if not camera then return end
-    local view = camera.ViewportSize
-    if view.X < 1 or view.Y < 1 then return end
-    local mobile = view.X < 710
-    local width, height = mobile and 370 or 730, mobile and 496 or 410
-    root.Size = UDim2.fromOffset(width, height)
-    rootScale.Scale = math.min(1, math.max(.52, math.min((view.X - 16) / width, (view.Y - 16) / height)))
-    if mobile then
-        side.Position = UDim2.fromOffset(3, 3)
-        side.Size = UDim2.fromOffset(width - 6, 107)
-        panel.Position = UDim2.fromOffset(3, 119)
-        panel.Size = UDim2.fromOffset(width - 6, height - 122)
-        emblemBack.Position = UDim2.fromOffset(width - 85, 54)
-        emblemBack.Size = UDim2.fromOffset(50, 50)
-        emblem.TextSize = 36
-        brand.Position = UDim2.fromOffset(49, 11)
-        brand.Size = UDim2.fromOffset(width - 75, 33)
-        crown.Position = UDim2.fromOffset(19, 11)
-        sideLine.Position = UDim2.fromOffset(15, 52)
-        sideLine.Size = UDim2.new(1, -30, 0, 1)
-        accessLabel.Position = UDim2.fromOffset(19, 60)
-        accessLabel.Size = UDim2.new(1, -115, 0, 23)
-        accessLabel.TextSize = 18
-        versionLabel.Position = UDim2.fromOffset(19, 82)
-        versionLabel.Size = UDim2.new(1, -115, 0, 19)
-        versionLabel.TextSize = 12
-        sideBottomLine.Visible = false
-        credit.Visible = false
-        eyebrow.Position = UDim2.fromOffset(19, 12)
-        eyebrow.Size = UDim2.new(1, -90, 0, 20)
-        eyebrow.TextSize = 12
-        title.Position = UDim2.fromOffset(19, 40)
-        title.Size = UDim2.new(1, -38, 0, 46)
-        title.TextSize = 28
-        subtitle.Position = UDim2.fromOffset(19, 86)
-        subtitle.Size = UDim2.new(1, -38, 0, 26)
-        subtitle.TextSize = 15
-        inputFace.Position = UDim2.fromOffset(19, 124)
-        inputFace.Size = UDim2.new(1, -38, 0, 56)
-        button.Position = UDim2.fromOffset(19, 191)
-        button.Size = UDim2.new(1, -38, 0, 57)
-        buttonText.TextSize = 20
-        status.Position = UDim2.fromOffset(19, 258)
-        status.Size = UDim2.new(1, -38, 0, 48)
-        footerLine.Position = UDim2.fromOffset(19, 324)
-        footerLine.Size = UDim2.new(1, -38, 0, 1)
-        footer.Position = UDim2.fromOffset(19, 337)
-        footer.Size = UDim2.new(1, -38, 0, 22)
-        minimize.Position = UDim2.new(1, -71, 0, 8)
-        close.Position = UDim2.new(1, -41, 0, 8)
+local function brandText(parent,name,pos,size,pixels)
+    local text=label(parent,name,"Reyzn",pos,size,pixels,C.white,Enum.Font.GrenzeGotisch)
+    text.TextColor3=Color3.new(1,1,1)
+    text.TextTruncate=Enum.TextTruncate.None
+    -- Static chrome bands keep the lettering crisp; only a rare separate sweep
+    -- moves. Text stays native and readable even when images cannot be loaded.
+    local metal=make("UIGradient",text,{Rotation=90,Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,C.chrome),ColorSequenceKeypoint.new(.30,C.white),
+        ColorSequenceKeypoint.new(.50,C.muted),ColorSequenceKeypoint.new(.57,C.chrome),
+        ColorSequenceKeypoint.new(1,C.light)})})
+    local outline=make("UIStroke",text,{Color=C.black,Transparency=.28,Thickness=.8,ApplyStrokeMode=Enum.ApplyStrokeMode.Contextual})
+    return text,metal,outline
+
+-- NO GAMEPLAY CONTROLLERS ARE LOADED UNTIL AUTHORIZATION
+UI.gui=make("ScreenGui",playerGui,{Name="ReyznXKeyLoader",ResetOnSpawn=false,DisplayOrder=72,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,IgnoreGuiInset=false})
+pcall(function() UI.gui.ScreenInsets=Enum.ScreenInsets.CoreUISafeInsets end)
+UI.gui:SetAttribute("Version",VERSION)
+UI.gui:SetAttribute("Build",BUILD)
+UI.gui:SetAttribute("ScriptStatus","WaitingForKey")
+UI.gui:SetAttribute("VisualQuality","Ultra High")
+UI.gui:SetAttribute("EffectiveQuality","Ultra High")
+UI.gui:SetAttribute("VFXRate",VFX_RATE)
+local function cleanup()
+    if not state.alive then return end
+    state.alive=false; state.drag=nil
+    for _,feature in pairs(features) do if feature.destroy then feature:destroy() end end
+    for _,c in ipairs(connections) do c:Disconnect() end
+    for _,t in pairs(tweens) do t:Cancel() end
+    for thread in pairs(threads) do if coroutine.status(thread)~="dead" then pcall(task.cancel,thread) end end
+    table.clear(connections);table.clear(threads);table.clear(tweens)
+end
+connections[#connections+1]=UI.gui.Destroying:Connect(cleanup)
+UI.windowFade=make("NumberValue",UI.gui,{Name="WindowOpacity",Value=0})
+UI.launcherFade=make("NumberValue",UI.gui,{Name="LauncherOpacity",Value=0})
+UI.paneProgress=make("NumberValue",UI.gui,{Name="PaneProgress",Value=1})
+UI.pageFade=make("NumberValue",UI.gui,{Name="PageOpacity",Value=1})
+UI.zoom=make("NumberValue",UI.gui,{Name="WindowZoom",Value=.985})
+UI.screen=frame(UI.gui,"SafeArea",UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1)
+UI.screen.ClipsDescendants=false
+UI.window=frame(UI.screen,"Window",UDim2.fromOffset(100,100),UDim2.fromOffset(880,420),nil,1,"window")
+UI.window.ClipsDescendants=false
+UI.scale=make("UIScale",UI.window,{Scale=.985})
+
+-- Four shallow light fields are clipped inside each surface. Their edge energy
+-- travels independently; no dark shadow extends below the bottom border.
+local InwardLight={};InwardLight.__index=InwardLight
+function InwardLight.new(parent,seed)
+    local self=setmetatable({fields={},seed=seed},InwardLight)
+    local clip=frame(parent,"InwardLight",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),nil,1)
+    clip.ZIndex=3;clip.ClipsDescendants=true;clip.Active=false
+    for side=1,4 do
+        local field=frame(clip,"InwardGlow",UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1)
+        field.Active=false
+        local horizontal=side%2==1
+        field.Size=horizontal and UDim2.new(.58,0,0,26) or UDim2.new(0,24,.58,0)
+        local strips={}
+        -- Feather both dimensions: the cross-edge gradient fades inward, while
+        -- the strip weights fade both ends. No hard-ended glowing pills.
+        for i=1,9 do
+            local strip=frame(field,"GlowFeather",horizontal and UDim2.fromScale((i-1)/9,0) or UDim2.fromScale(0,(i-1)/9),
+                horizontal and UDim2.fromScale(1/9,1) or UDim2.fromScale(1,1/9),Color3.new(1,1,1),1)
+            strip.Active=false
+            local wash=gradient(strip,side%2==1 and {C.cyan,C.violet,C.deep} or {C.deep,C.violet,C.cyan},horizontal and 90 or 0)
+            local reverse=side==2 or side==3
+            wash.Transparency=NumberSequence.new({
+                NumberSequenceKeypoint.new(0,reverse and 1 or 0),
+                NumberSequenceKeypoint.new(.25,reverse and .96 or .55),
+                NumberSequenceKeypoint.new(.75,reverse and .55 or .96),
+                NumberSequenceKeypoint.new(1,reverse and 0 or 1)})
+            strips[i]={node=strip,weight=math.sin((i-.5)/9*math.pi)^2}
+        end
+        self.fields[side]={node=field,strips=strips}
+    end
+    return self
+end
+function InwardLight:update(time,burst)
+    for side,item in ipairs(self.fields) do
+        local travel=.21+.19*math.sin(time*.24+self.seed+side*1.7)
+        local node=item.node
+        if side==1 then node.Position=UDim2.new(travel,0,0,0)
+        elseif side==2 then node.Position=UDim2.new(1,-24,travel,0)
+        elseif side==3 then node.Position=UDim2.new(travel,0,1,-26)
+        else node.Position=UDim2.new(0,0,travel,0) end
+        local strength=.21+.06*math.sin(time*.7+self.seed+side)^2+burst*.025
+        for _,strip in ipairs(item.strips) do alpha(strip.node,"BackgroundTransparency",1-strength*strip.weight) end
+    end
+end
+local function background(parent,radius)
+    local image=imageLabel(parent,"InterfaceBackground",UDim2.fromOffset(1,1),UDim2.new(1,-2,1,-2))
+    image.ZIndex=2;image.ScaleType=Enum.ScaleType.Crop;image.Active=false
+    image.ImageColor3=Color3.new(1,1,1);corner(image,radius)
+    alpha(image,"ImageTransparency",BACKGROUND_TRANSPARENCY)
+    artworkImages.Background[#artworkImages.Background+1]=image
+    return image
+end
+-- The supplied emblem remains unchanged. Three low-opacity copies provide a
+-- traveling bloom and a narrow highlight; only gradients/alpha move each tick.
+local EmblemNeon={};EmblemNeon.__index=EmblemNeon
+function EmblemNeon.new(host)
+    local self=setmetatable({layers={}},EmblemNeon)
+    for i,data in ipairs({{"EmblemBloomWide",16,.40,0},{"EmblemBloomNear",6,.48,.5},{"EmblemSweep",0,.68,0}}) do
+        local image=imageLabel(host,data[1],UDim2.fromOffset(-data[2]/2,-data[2]/2),UDim2.new(1,data[2],1,data[2]))
+        image.ZIndex=i==3 and 4 or i;image.Active=false
+        local wash=gradient(image,{C.pink,C.light,C.violet,C.rose},0)
+        if i==3 then
+            wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(.26,1),
+                NumberSequenceKeypoint.new(.46,.08),NumberSequenceKeypoint.new(.54,.08),NumberSequenceKeypoint.new(.74,1),NumberSequenceKeypoint.new(1,1)})
+        end
+        alpha(image,"ImageTransparency",1)
+        artworkImages.Emblem[#artworkImages.Emblem+1]=image
+        self.layers[i]={image=image,wash=wash,strength=data[3],phase=data[4]}
+    end
+    return self
+end
+function EmblemNeon:update(time,burst)
+    local tint=C.pink:Lerp(C.orchid,.5+.5*math.sin(time*.8))
+    for _,layer in ipairs(self.layers) do
+        local progress=(time/4.8+layer.phase)%1
+        local envelope=math.sin(progress*math.pi)^2
+        layer.wash.Offset=Vector2.new(-.9+1.8*progress,0)
+        layer.image.ImageColor3=tint
+        alpha(layer.image,"ImageTransparency",1-envelope*(layer.strength+burst*.04))
+    end
+end
+local function surface(parent,name,pos,size,scope)
+    local o=frame(parent,name,pos,size,Color3.new(1,1,1),0,scope);corner(o,16)
+    gradient(o,{C.panel,C.base,C.black},100)
+    background(o,15)
+    local inward=InwardLight.new(o,name=="Dock" and .7 or 2.3)
+    local edge=stroke(o,Color3.new(1,1,1),.36,1)
+    local metal=gradient(edge,{C.steel,C.cyan,C.silver,C.violet,C.black,C.cyan},24)
+    local neon=NeonFlow.new(o,"SurfaceNeon",15,name=="Dock" and .45 or 2.8,metal)
+    local inner=frame(o,"InnerRim",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),nil,1)
+    corner(inner,14);stroke(inner,C.silver,.94,1)
+    local beam=frame(o,"EdgeLight",UDim2.fromOffset(16,0),UDim2.new(1,-32,0,1),C.white,.65)
+    local beamGradient=gradient(beam,{C.violet,C.cyan,C.silver},0);fadeGradient(beamGradient)
+    local sheen=frame(o,"SurfaceReflection",UDim2.fromOffset(3,3),UDim2.new(1,-6,1,-6),C.chrome,1)
+    corner(sheen,14);local sweep=gradient(sheen,{C.chrome,C.ice},28);fadeGradient(sweep)
+    inner.ZIndex=3;beam.ZIndex=3;sheen.ZIndex=3
+    addReflection(sheen,sweep,.035)
+    return o,{edge=edge,metal=metal,beam=beam,beamGradient=beamGradient,inward=inward,neon=neon}
+end
+UI.dock,UI.dockFx=surface(UI.window,"Dock",UDim2.fromOffset(0,0),UDim2.fromOffset(170,420))
+UI.dock.ZIndex=2
+UI.dockCrown=icon(UI.dock,"crown",UDim2.fromOffset(17,20),24,C.light)
+UI.brand=brandText(UI.dock,"BrandText",UDim2.fromOffset(46,8),UDim2.fromOffset(116,44),25)
+UI.dragArea=frame(UI.dock,"DragArea",UDim2.fromOffset(0,0),UDim2.new(1,0,0,60),nil,1)
+UI.dragArea.Active=true;UI.dragArea.ZIndex=5
+UI.dockDivider=frame(UI.dock,"Divider",UDim2.fromOffset(14,62),UDim2.new(1,-28,0,1),C.line,.25)
+gradient(UI.dockDivider,{C.black,C.violet,C.black},0)
+UI.nav=make("ScrollingFrame",UI.dock,{Name="Navigation",Position=UDim2.fromOffset(9,76),Size=UDim2.new(1,-18,1,-138),
+    BackgroundTransparency=1,CanvasSize=UDim2.fromOffset(0,240),CanvasPosition=Vector2.zero,ScrollBarThickness=2,
+    ScrollBarImageColor3=C.violet,ScrollBarImageTransparency=.65,Active=true,ScrollingEnabled=true,
+    ClipsDescendants=true,ScrollingDirection=Enum.ScrollingDirection.Y,AutomaticCanvasSize=Enum.AutomaticSize.None})
+local navigation={}
+local optionFont=OPTION_FONT
+for i,data in ipairs({{"Home","home"},{"Main","cube"},{"Visuals","spark"},{"Scripts","code"},{"Settings","settings"}}) do
+    local b,fx=button(UI.nav,"Tab_"..data[1],UDim2.fromOffset(0,(i-1)*48),UDim2.new(1,-3,0,42))
+    local glyph=icon(b,data[2],UDim2.fromOffset(12,10),22,C.muted)
+    local caption=label(b,"Caption",data[1],UDim2.fromOffset(45,0),UDim2.new(1,-51,1,0),19,C.muted,optionFont)
+    navigation[data[1]]={button=b,fx=fx,icon=glyph,caption=caption,index=i}
+end
+UI.selectionLight=frame(UI.nav,"SelectionLight",UDim2.fromOffset(0,12),UDim2.fromOffset(2,18),Color3.new(1,1,1),0)
+gradient(UI.selectionLight,{C.violet,C.cyan,C.chrome},90)
+UI.selectionLight.ZIndex=4;corner(UI.selectionLight,2)
+UI.controls=frame(UI.dock,"WindowControls",UDim2.new(0,12,1,-50),UDim2.new(1,-24,0,36),nil,1)
+local controlArtwork={}
+for i,data in ipairs({{"Minimize","minimize"},{"Collapse","fold"},{"Close","close"}}) do
+    local b=make("ImageButton",UI.controls,{Name=data[1],Image="",BackgroundTransparency=1,Position=UDim2.fromOffset((i-1)*46,0),Size=UDim2.fromOffset(40,36),AutoButtonColor=false,Active=true,Selectable=true})
+    local fallback=frame(b,"ControlFallback",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1))
+    corner(fallback,10);gradient(fallback,metallicColors,105);stroke(fallback,C.silver,.6)
+    local glyph=icon(fallback,data[2],UDim2.fromOffset(9,7),22,C.silver)
+    if data[1]=="Collapse" then UI.foldIcon=glyph end
+    local glow=imageLabel(b,"ControlGlow",UDim2.fromScale(.5,.5),UDim2.new(1,8,1,6))
+    glow.AnchorPoint=Vector2.new(.5,.5);glow.ImageColor3=C.ice;alpha(glow,"ImageTransparency",.95)
+    local art=imageLabel(b,"ControlArtwork",UDim2.fromScale(.5,.5),UDim2.new(1,4,1,0))
+    art.AnchorPoint=Vector2.new(.5,.5)
+    local artScale=make("UIScale",art,{Scale=1})
+    local record={image=art,glow=glow,fallback=fallback,glyph=glyph,scale=artScale,pressed=false,hover=false}
+    controlArtwork[data[1]]=record
+    local controlSheen=frame(b,"ControlReflection",UDim2.fromOffset(2,8),UDim2.new(1,-4,0,20),C.chrome,1)
+    corner(controlSheen,8);local controlSweep=gradient(controlSheen,{C.white,C.ice},25);fadeGradient(controlSweep)
+    record.reflection=addReflection(controlSheen,controlSweep,.17)
+    connect(b.MouseEnter,function() record.hover=true;alpha(glow,"ImageTransparency",.82);VFX.reflections:request(record.reflection);if not record.pressed then tween(artScale,.18,{Scale=1.025}) end end)
+    connect(b.MouseLeave,function() record.hover=false;alpha(glow,"ImageTransparency",.95);if not record.pressed then tween(artScale,.18,{Scale=1}) end end)
+    connect(b.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            if record.pressed then return end
+            record.pressed=true;record.pointer=input;tween(artScale,.09,{Scale=.97});alpha(glow,"ImageTransparency",.74);VFX.reflections:request(record.reflection)
+        end
+    end)
+    connect(Input.InputEnded,function(input)
+        if record.pressed and (input==record.pointer or (record.pointer.UserInputType==Enum.UserInputType.MouseButton1 and input.UserInputType==Enum.UserInputType.MouseButton1)) then
+            record.pressed=false;record.pointer=nil;tween(artScale,.22,{Scale=record.hover and 1.025 or 1});alpha(glow,"ImageTransparency",record.hover and .82 or .95)
+        end
+    end)
+    connect(Input.WindowFocusReleased,function() record.pressed=false;record.pointer=nil;tween(artScale,.16,{Scale=1}) end)
+    UI[data[1]]=b
+end
+UI.reveal=frame(UI.window,"PanelReveal",UDim2.fromOffset(180,0),UDim2.fromOffset(700,420),nil,1,"pane")
+UI.reveal.ZIndex=2
+UI.reveal.ClipsDescendants=true
+UI.panel,UI.panelFx=surface(UI.reveal,"Panel",UDim2.fromOffset(4,4),UDim2.fromOffset(692,412))
+VFX.surfaces={UI.dockFx,UI.panelFx}
+UI.header=frame(UI.panel,"Header",UDim2.fromOffset(20,8),UDim2.new(1,-40,0,58),nil,1)
+UI.pageTitle=label(UI.header,"PageTitle","Home",UDim2.fromOffset(0,0),UDim2.fromOffset(130,54),23,C.white,optionFont)
+UI.avatarPlate=frame(UI.header,"AvatarPlate",UDim2.fromOffset(190,11),UDim2.fromOffset(32,32),C.panel)
+corner(UI.avatarPlate,100);stroke(UI.avatarPlate,C.light,.18)
+UI.avatarFallback=label(UI.avatarPlate,"AvatarFallback",string.upper(string.sub(player.Name,1,1)),UDim2.fromScale(0,0),UDim2.fromScale(1,1),14)
+UI.avatarFallback.TextXAlignment=Enum.TextXAlignment.Center
+UI.avatar=imageLabel(UI.avatarPlate,"Avatar",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4))
+UI.avatar.ScaleType=Enum.ScaleType.Crop;corner(UI.avatar,100)
+UI.userID=label(UI.header,"UserID","ID  "..tostring(player.UserId),UDim2.fromOffset(232,0),UDim2.fromOffset(170,54),12,C.muted)
+UI.sessionDot=frame(UI.header,"SessionDot",UDim2.fromOffset(422,24),UDim2.fromOffset(5,5),C.violet)
+corner(UI.sessionDot,5)
+UI.session=label(UI.header,"SessionTime","00:00:00",UDim2.fromOffset(436,0),UDim2.fromOffset(94,54),12,C.silver,Enum.Font.RobotoMono)
+UI.panelDrag=frame(UI.panel,"PanelDragArea",UDim2.fromOffset(0,0),UDim2.new(1,0,0,68),nil,1)
+UI.panelDrag.Active=true;UI.panelDrag.ZIndex=5
+UI.headerLine=frame(UI.panel,"HeaderLine",UDim2.fromOffset(18,67),UDim2.new(1,-36,0,1),C.line,.2)
+gradient(UI.headerLine,{C.steel,C.deep,C.silver},0)
+UI.content=frame(UI.panel,"Content",UDim2.fromOffset(16,80),UDim2.new(1,-32,1,-116),nil,1)
+UI.content.ClipsDescendants=true
+UI.credit=label(UI.panel,"Credit","Made By Reyzn",UDim2.new(0,20,1,-30),UDim2.new(1,-40,0,22),11,C.muted)
+UI.credit.TextXAlignment=Enum.TextXAlignment.Right
+local pages={}
+for _,name in ipairs({"Home","Main","Visuals","Scripts","Settings"}) do
+    local page=make("ScrollingFrame",UI.content,{Name="Page_"..name,Position=UDim2.fromOffset(0,0),Size=UDim2.fromScale(1,1),
+        BackgroundTransparency=1,CanvasSize=UDim2.fromOffset(0,0),CanvasPosition=Vector2.zero,ScrollBarThickness=3,
+        ScrollBarImageColor3=C.violet,ScrollBarImageTransparency=.5,Active=true,ScrollingEnabled=true,
+        ClipsDescendants=true,ScrollingDirection=Enum.ScrollingDirection.Y,AutomaticCanvasSize=Enum.AutomaticSize.None,Visible=name=="Home"},"page")
+    pages[name]=page
+end
+-- Main contains opt-in features; Visuals has one-click controls.
+-- Visual quality is always Ultra High.
+UI.hero=frame(pages.Home,"Hero",UDim2.fromOffset(1,1),UDim2.new(1,-8,0,200),Color3.new(1,1,1))
+corner(UI.hero,13)
+local heroEdge=stroke(UI.hero,Color3.new(1,1,1),.52)
+local heroMetal=gradient(heroEdge,{C.violet,C.cyan,C.silver,C.deep},28)
+gradient(UI.hero,{Color3.fromRGB(28,22,40),C.black,Color3.fromRGB(26,17,39)},32)
+local heroSheen=frame(UI.hero,"HeroReflection",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),C.chrome,1)
+corner(heroSheen,12);local heroSweep=gradient(heroSheen,{C.chrome,C.light},28);fadeGradient(heroSweep)
+addReflection(heroSheen,heroSweep,.05)
+UI.heroTitle=brandText(UI.hero,"HeroTitle",UDim2.fromOffset(20,10),UDim2.fromOffset(268,100),48)
+UI.heroTitle.ZIndex=4
+UI.heroBackground=background(UI.hero,12)
+UI.heroNeon=NeonFlow.new(UI.hero,"HeroNeon",12,4.6,heroMetal)
+heroSheen.ZIndex=3
+UI.status=frame(UI.hero,"ScriptInfo",UDim2.fromOffset(22,116),UDim2.fromOffset(188,64),nil,1)
+UI.status.ZIndex=4
+UI.statusLabel=label(UI.status,"StatusLabel","Status",UDim2.fromOffset(0,0),UDim2.fromOffset(62,26),17,C.muted,optionFont)
+UI.statusDot=frame(UI.status,"StatusDot",UDim2.fromOffset(71,11),UDim2.fromOffset(4,4),C.pink,.08)
+corner(UI.statusDot,4)
+UI.statusValue=label(UI.status,"StatusValue","Locked",UDim2.fromOffset(82,0),UDim2.new(1,-82,0,26),17,C.white,optionFont)
+UI.versionLabel=label(UI.status,"VersionLabel","Version",UDim2.fromOffset(0,29),UDim2.fromOffset(62,26),17,C.muted,optionFont)
+UI.versionValue=label(UI.status,"VersionValue",VERSION,UDim2.fromOffset(71,29),UDim2.new(1,-71,0,26),16,C.light,Enum.Font.RobotoMono)
+UI.emblemHost=frame(UI.hero,"EmblemHost",UDim2.new(1,-224,0,2),UDim2.fromOffset(220,196),nil,1)
+UI.emblemHost.ZIndex=4
+UI.emblemNeon=EmblemNeon.new(UI.emblemHost)
+UI.xFallback=label(UI.emblemHost,"XFallback","X",UDim2.fromScale(0,0),UDim2.fromScale(1,1),92,C.light,Enum.Font.GothamBold)
+UI.xFallback.ZIndex=3;UI.xFallback.TextXAlignment=Enum.TextXAlignment.Center
+UI.xImage=imageLabel(UI.emblemHost,"EmblemX",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+UI.xImage.ZIndex=3;artworkImages.Emblem[#artworkImages.Emblem+1]=UI.xImage
+-- Explicit sibling layers keep supplied backgrounds visible and controls above
+-- the decoration, independently of creation order or later asset completion.
+for _,object in ipairs({UI.dockCrown,UI.brand,UI.dockDivider,UI.nav,UI.controls,
+    UI.header,UI.headerLine,UI.content,UI.credit}) do object.ZIndex=4 end
+
+UI.launcher=make("ImageButton",UI.screen,{Name="Launcher",Image="",BackgroundTransparency=1,Size=UDim2.fromOffset(68,68),Position=UDim2.fromOffset(20,150),AutoButtonColor=false,Visible=false,Selectable=true},"launcher")
+UI.launcherScale=make("UIScale",UI.launcher,{Scale=.92})
+UI.launcherArt=frame(UI.launcher,"LauncherArtwork",UDim2.fromScale(.5,.5),UDim2.fromScale(1,1),nil,1)
+UI.launcherArt.AnchorPoint=Vector2.new(.5,.5);UI.launcherArt.ZIndex=2;UI.launcherArt.Active=false
+UI.launcherPress=make("UIScale",UI.launcherArt,{Name="LauncherPressScale",Scale=1})
+UI.rFallback=label(UI.launcherArt,"RFallback","R",UDim2.fromScale(0,0),UDim2.fromScale(1,1),34,C.white,Enum.Font.GothamBold)
+UI.rFallback.TextXAlignment=Enum.TextXAlignment.Center
+UI.launcherImage=imageLabel(UI.launcherArt,"LauncherR",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+UI.launcherImage.ZIndex=2;UI.rFallback.ZIndex=2
+-- Display the actual logo, rather than the transparent margins of its file.
+-- The original PNG is untouched; the touch/drag target remains 68 x 68.
+UI.launcherImage.ImageRectOffset=Vector2.new(88,104)
+UI.launcherImage.ImageRectSize=Vector2.new(1080,1040)
+UI.launcherShine=imageLabel(UI.launcherArt,"LauncherShine",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+UI.launcherShine.ImageRectOffset=UI.launcherImage.ImageRectOffset
+UI.launcherShine.ImageRectSize=UI.launcherImage.ImageRectSize
+UI.launcherShine.ZIndex=3;UI.launcherShine.Active=false
+alpha(UI.launcherShine,"ImageTransparency",1)
+UI.launcherSweep=gradient(UI.launcherShine,{C.ice,C.chrome,C.light},-24)
+fadeGradient(UI.launcherSweep)
+UI.recovery=make("ImageButton",UI.screen,{Name="Recover",Image="",BackgroundColor3=C.panel,Size=UDim2.fromOffset(40,40),Position=UDim2.new(0,8,.5,-20),AutoButtonColor=false,Visible=false})
+corner(UI.recovery,10);stroke(UI.recovery,C.light,.3)
+UI.recoveryFallback=label(UI.recovery,"RecoveryFallback","R",UDim2.fromScale(0,0),UDim2.fromScale(1,1),22,C.white,Enum.Font.GothamBold)
+UI.recoveryFallback.TextXAlignment=Enum.TextXAlignment.Center
+UI.recoveryImage=imageLabel(UI.recovery,"RecoveryR",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+
+-- Every fire surface shares the approved minimized-logo texture, palette and
+-- complementary rising lifetimes. The window profile distributes UPWARD roots
+-- along its perimeter; it never rotates flames towards the sides or the bottom.
+local function noise(seed) return (math.sin(seed*12.9898+78.233)*43758.5453)%1 end
+local UpdraftFire={};UpdraftFire.__index=UpdraftFire
+local firePink=Color3.fromRGB(183,48,139)
+local firePurple=Color3.fromRGB(151,62,246)
+local fireCyan=C.cyan
+function UpdraftFire.new(parent,name,scope,width,height,wide,perimeter)
+    local host=frame(parent,name,UDim2.fromOffset(0,0),UDim2.fromOffset(width,height),nil,1,scope)
+    host.Active=false;host.ClipsDescendants=false;host.ZIndex=0
+    local self=setmetatable({host=host,roots={},wisps={},embers={},wide=wide,perimeter=perimeter},UpdraftFire)
+    local points={}
+    if perimeter then
+        for side,count in ipairs(perimeter) do
+            for i=1,count do points[#points+1]={side=side,fraction=(i-.5)/count} end
+        end
     else
-        side.Position = UDim2.fromOffset(3, 3)
-        side.Size = UDim2.fromOffset(203, 404)
-        panel.Position = UDim2.fromOffset(216, 3)
-        panel.Size = UDim2.fromOffset(511, 404)
-        emblemBack.Position = UDim2.fromOffset(30, 91)
-        emblemBack.Size = UDim2.fromOffset(143, 143)
-        emblem.TextSize = 102
-        brand.Position = UDim2.fromOffset(47, 14)
-        brand.Size = UDim2.new(1, -60, 0, 32)
-        crown.Position = UDim2.fromOffset(17, 14)
-        sideLine.Position = UDim2.fromOffset(15, 56)
-        sideLine.Size = UDim2.new(1, -30, 0, 2)
-        accessLabel.Position = UDim2.fromOffset(17, 278)
-        accessLabel.Size = UDim2.new(1, -34, 0, 29)
-        accessLabel.TextSize = 20
-        versionLabel.Position = UDim2.fromOffset(17, 308)
-        versionLabel.Size = UDim2.new(1, -34, 0, 23)
-        versionLabel.TextSize = 14
-        sideBottomLine.Visible = true
-        credit.Visible = true
-        eyebrow.Position = UDim2.fromOffset(30, 24)
-        eyebrow.Size = UDim2.new(1, -110, 0, 22)
-        eyebrow.TextSize = 15
-        title.Position = UDim2.fromOffset(30, 53)
-        title.Size = UDim2.new(1, -60, 0, 48)
-        title.TextSize = 34
-        subtitle.Position = UDim2.fromOffset(30, 105)
-        subtitle.Size = UDim2.new(1, -60, 0, 30)
-        subtitle.TextSize = 17
-        inputFace.Position = UDim2.fromOffset(30, 158)
-        inputFace.Size = UDim2.new(1, -60, 0, 59)
-        button.Position = UDim2.fromOffset(30, 232)
-        button.Size = UDim2.new(1, -60, 0, 57)
-        buttonText.TextSize = 22
-        status.Position = UDim2.fromOffset(30, 295)
-        status.Size = UDim2.new(1, -60, 0, 43)
-        footerLine.Position = UDim2.fromOffset(30, 351)
-        footerLine.Size = UDim2.new(1, -60, 0, 1)
-        footer.Position = UDim2.fromOffset(30, 363)
-        footer.Size = UDim2.new(1, -60, 0, 23)
-        minimize.Position = UDim2.new(1, -75, 0, 16)
-        close.Position = UDim2.new(1, -44, 0, 16)
+        local count=wide and 12 or 8
+        for i=1,count do points[i]={fraction=(i-.5)/count} end
+    end
+    for i,point in ipairs(points) do
+        local seed=i*1.713+(perimeter and #name*.23 or 0)
+        local root=frame(host,"UpdraftRoot",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1),nil,1)
+        root.Active=false
+        local layers={}
+        for layer=1,2 do
+            local image=imageLabel(root,layer==1 and "UpdraftVeil" or "UpdraftBody",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
+            image.AnchorPoint=Vector2.new(.5,1);image.ScaleType=Enum.ScaleType.Stretch;image.Active=false
+            image.ImageRectOffset=Vector2.new(110,0);image.ImageRectSize=Vector2.new(1040,1254)
+            local wash=gradient(image,{firePink:Lerp(C.pink,.35),firePurple,C.light,fireCyan},90)
+            wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,.30),
+                NumberSequenceKeypoint.new(.2,.02),NumberSequenceKeypoint.new(.78,0),NumberSequenceKeypoint.new(1,1)})
+            alpha(image,"ImageTransparency",1)
+            layers[layer]=image;VFX.images[#VFX.images+1]=image
+        end
+        local core=imageLabel(root,"UpdraftCore",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
+        core.AnchorPoint=Vector2.new(.5,1);core.ScaleType=Enum.ScaleType.Stretch;core.Active=false
+        local coreLight=gradient(core,{firePurple,fireCyan,C.chrome},90)
+        coreLight.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,.2),
+            NumberSequenceKeypoint.new(.35,0),NumberSequenceKeypoint.new(.78,0),NumberSequenceKeypoint.new(1,1)})
+        alpha(core,"ImageTransparency",1)
+        VFX.images[#VFX.images+1]=core
+        self.roots[i]={node=root,layers=layers,core=core,seed=seed,
+            fraction=point.fraction,side=point.side,height=.85+noise(seed)*.29}
+    end
+    for i=1,wide and 8 or 6 do
+        local node=imageLabel(host,"RisingWisp",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
+        node.AnchorPoint=Vector2.new(.5,1);node.ScaleType=Enum.ScaleType.Stretch;node.Active=false
+        gradient(node,{firePink,firePurple,fireCyan},90);alpha(node,"ImageTransparency",1)
+        VFX.images[#VFX.images+1]=node
+        self.wisps[i]={node=node,seed=i*1.391,rate=.53+noise(i)*.17}
+    end
+    for i=1,8 do
+        local node=frame(host,"RisingEmber",UDim2.fromOffset(0,0),UDim2.fromOffset(1.3,3.5),i%2==0 and fireCyan or C.rose,1)
+        node.Active=false;node.AnchorPoint=Vector2.new(.5,.5);corner(node,2)
+        self.embers[i]={node=node,seed=i*.713,rate=.38+noise(i+6)*.22}
+    end
+    return self
+end
+function UpdraftFire:update(time,burst)
+    local w,h=self.host.Size.X.Offset,self.host.Size.Y.Offset
+    if w<20 or h<20 then return end
+    local count=#self.roots
+    for _,p in ipairs(self.roots) do
+        local baseX=-3+(w+6)*p.fraction
+        local baseY=h+2
+        local height=(h+(self.wide and 27 or 40))*p.height
+        local width=self.wide and (w+14)/count*2 or 47
+        if self.perimeter then
+            if p.side==1 or p.side==3 then
+                baseX=10+(w-20)*p.fraction
+                baseY=p.side==1 and 4 or h+13
+                width=math.clamp(w/self.perimeter[p.side]*1.4,18,66)
+                height=(p.side==1 and 64 or 55)*p.height
+            else
+                baseX=p.side==2 and w+3 or -3
+                baseY=16+(h-24)*p.fraction
+                width=38;height=math.clamp(h/self.perimeter[p.side]*1.45,66,92)*p.height
+            end
+        end
+        p.node.Position=UDim2.fromOffset(baseX,baseY)
+        for layer,image in ipairs(p.layers) do
+            local age=(time*(.61+noise(p.seed)*.18)+p.seed+(layer-1)*.5)%1
+            local envelope=math.sin(age*math.pi)^2
+            local bend=math.sin(time*2.5+p.seed)*2+math.sin(time*4.3-p.seed)*.7
+            image.Position=UDim2.fromOffset(bend+math.sin(age*math.pi)*(layer==1 and -3 or 3),-age*5)
+            image.Size=UDim2.fromOffset(width*(1.1-age*.2),height*(.73+age*.53))
+            image.Rotation=bend*(layer==1 and -1.5 or 2)
+            alpha(image,"ImageTransparency",1-envelope*(.87+burst*.04))
+        end
+        p.core.Position=UDim2.fromOffset(math.sin(time*3-p.seed)*1.5,0)
+        p.core.Size=UDim2.fromOffset(width*.63,height*.76)
+        p.core.Rotation=math.sin(time*2.6+p.seed)*3
+        alpha(p.core,"ImageTransparency",.64-.12*math.sin(time*3.1+p.seed)^2)
+    end
+    for _,p in ipairs(self.wisps) do
+        local age=(time*p.rate+p.seed)%1
+        local envelope=math.sin(age*math.pi)^2
+        local x=-5+(w+10)*noise(p.seed)+math.sin(age*4+p.seed)*5*age
+        local y=h+8-age*(h+(self.wide and 48 or 65))
+        if self.perimeter then
+            local side=math.floor(p.seed*10)%3
+            if side==0 then y=3-age*60
+            else x=side==1 and -8 or w+8;y=h*noise(p.seed+2)-age*62 end
+        end
+        p.node.Position=UDim2.fromOffset(x,y)
+        p.node.Size=UDim2.fromOffset((self.wide and 30 or 22)*(1-age*.38),42+age*13)
+        p.node.Rotation=math.sin(time*2+p.seed)*7
+        alpha(p.node,"ImageTransparency",1-envelope*.66)
+    end
+    for _,p in ipairs(self.embers) do
+        local age=(time*p.rate+p.seed)%1
+        local x=-8+(w+16)*noise(p.seed+4)+math.sin(age*5+p.seed)*4
+        local y=h+6-age*(h+54)
+        if self.perimeter then
+            local side=math.floor(p.seed*10)%3
+            if side==0 then y=-8-age*48
+            else x=(side==1 and -11 or w+11)+math.sin(age*5+p.seed)*3;y=h*noise(p.seed+5)-age*64 end
+        end
+        p.node.Position=UDim2.fromOffset(x,y)
+        alpha(p.node,"BackgroundTransparency",1-math.sin(age*math.pi)^2*.62)
     end
 end
+UI.dockAura=UpdraftFire.new(UI.window,"DockAura","window",170,420,true,{4,6,3,6})
+UI.panelAura=UpdraftFire.new(UI.window,"PanelAura","pane",692,412,true,{14,6,10,6})
+UI.launcherAura=UpdraftFire.new(UI.launcher,"LauncherAura","launcher",68,68,false)
 
--- Drag by the header/sidebar, without hijacking the key text field.
-local dragPointer, dragStart, initialPosition, moved
-local function startDrag(event)
-    if event.UserInputType ~= Enum.UserInputType.Touch
-        and event.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
-    dragPointer, dragStart, initialPosition, moved = event, event.Position, root.Position, false
+
+-- Access UI is placed inside the ORIGINAL Reyzn X Main page.
+-- Dock, panel, window controls, fire, navigation, buttons, assets and fonts
+-- above are copied from Reyzn X Experimental, not hand-drawn imitations.
+
+local VALID_KEY="reyzn-x-0809-2026"
+local ACCESS_FILE="ReyznX_KeyAccess_v1.txt"
+local ORIGINAL_HUB="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/Reyzn%20X.lua"
+local env=(type(getgenv)=="function" and getgenv()) or _G
+local launching=false
+local authorized=false
+local saved=false
+
+local function readAuthorization()
+    if type(readfile)~="function" or type(isfile)~="function" then return false end
+    local ok,value=pcall(function()
+        if isfile(ACCESS_FILE) then return readfile(ACCESS_FILE) end
+    end)
+    return ok and type(value)=="string" and value:match("^%s*(.-)%s*$")==VALID_KEY
 end
-connect(side.InputBegan, startDrag)
-connect(eyebrow.InputBegan, startDrag)
-connect(UserInputService.InputChanged, function(event)
-    if not dragPointer then return end
-    local typeOfPointer = dragPointer.UserInputType
-    if typeOfPointer == Enum.UserInputType.Touch and event ~= dragPointer then return end
-    if typeOfPointer == Enum.UserInputType.MouseButton1
-        and event.UserInputType ~= Enum.UserInputType.MouseMovement then return end
-    local delta = event.Position - dragStart
-    if not moved and delta.Magnitude < 5 then return end
-    moved = true
-    root.Position = UDim2.new(initialPosition.X.Scale, initialPosition.X.Offset + delta.X,
-        initialPosition.Y.Scale, initialPosition.Y.Offset + delta.Y)
-end)
-connect(UserInputService.InputEnded, function(event)
-    if dragPointer and (dragPointer == event or
-        (dragPointer.UserInputType == Enum.UserInputType.MouseButton1
-        and event.UserInputType == Enum.UserInputType.MouseButton1)) then
-        dragPointer = nil
-    end
-end)
-
-connect(close.Activated, shutdown)
-connect(minimize.Activated, function()
-    root.Visible = false
-    launcher.Visible = true
-end)
-connect(launcher.Activated, function()
-    launcher.Visible = false
-    root.Visible = true
-end)
-connect(button.MouseEnter, function()
-    if not launching then
-        tween(buttonScale, .17, {Scale = 1.012})
-        tween(buttonStroke, .17, {Transparency = .06})
-    end
-end)
-connect(button.MouseLeave, function()
-    if not launching then
-        tween(buttonScale, .17, {Scale = 1})
-        tween(buttonStroke, .17, {Transparency = .22})
-    end
-end)
-connect(button.InputBegan, function(event)
-    if event.UserInputType == Enum.UserInputType.Touch
-        or event.UserInputType == Enum.UserInputType.MouseButton1 then
-        tween(buttonScale, .08, {Scale = .973})
-    end
-end)
-connect(button.InputEnded, function()
-    if not launching then tween(buttonScale, .16, {Scale = 1}) end
-end)
-connect(input.Focused, function()
-    tween(inputStroke, .2, {Transparency = .03})
-end)
-connect(input.FocusLost, function()
-    tween(inputStroke, .2, {Transparency = .25})
-end)
-
-local function setBusy(busy)
-    launching = busy
-    button.Active = not busy
-    button.Selectable = not busy
-    input.TextEditable = not busy
-    buttonText.Text = busy and "LAUNCHING REYZN X..."
-        or authorized and "LAUNCH REYZN X" or "VERIFY & LAUNCH"
-    tween(buttonScale, .15, {Scale = busy and .985 or 1})
+local function saveAuthorization()
+    if type(writefile)~="function" then return false end
+    return pcall(function() writefile(ACCESS_FILE,VALID_KEY) end)
 end
+local function destroyLoader()
+    if state.alive then UI.gui:Destroy() end
+end
+env.ReyznXKeyLoaderStop=destroyLoader
+connect(UI.gui.Destroying,function()
+    if env.ReyznXKeyLoaderStop==destroyLoader then
+        env.ReyznXKeyLoaderStop=nil
+    end
+end)
 
-local function runOriginalHub()
-    if launching or not running then return end
-    setBusy(true)
-    notice("Checking access and loading Reyzn X...", "loading")
-    task.spawn(function()
-        local success, err = pcall(function()
-            if type(loadstring) ~= "function" then
-                error("This environment does not provide loadstring.", 0)
-            end
-            local body = game:HttpGet(HUB_URL)
-            if type(body) ~= "string" or body:match("^%s*$") then
-                error("The source returned no script.", 0)
-            end
-            local executable, compileError = loadstring(body)
-            if type(executable) ~= "function" then
-                error(compileError or "Failed to compile Reyzn X.", 0)
-            end
-            executable()
+-- The page layout and button chrome use Reyzn X's own factories.
+UI.keyHost=frame(pages.Main,"KeyAccessArea",UDim2.fromOffset(0,0),UDim2.fromOffset(440,314),nil,1)
+UI.keyLabel=label(UI.keyHost,"KeyHeading","REYZN X ACCESS",
+    UDim2.fromOffset(7,5),UDim2.new(1,-14,0,44),27,C.white,OPTION_FONT)
+UI.keyLabel.TextTruncate=Enum.TextTruncate.None
+UI.keyCaption=label(UI.keyHost,"KeyInstructions","Enter your access key to launch Reyzn X",
+    UDim2.fromOffset(7,47),UDim2.new(1,-14,0,30),17,C.muted,OPTION_FONT)
+UI.keyCaption.TextWrapped=true;UI.keyCaption.TextTruncate=Enum.TextTruncate.None
+UI.keyField=frame(UI.keyHost,"KeyInputMetal",UDim2.fromOffset(5,91),
+    UDim2.new(1,-10,0,60),Color3.new(1,1,1))
+corner(UI.keyField,13)
+gradient(UI.keyField,{Color3.fromRGB(25,26,32),C.black,Color3.fromRGB(21,21,27)},26)
+UI.keyStroke=stroke(UI.keyField,C.steel,.50,1)
+UI.keyGradient=gradient(UI.keyStroke,{C.deep,C.violet,C.cyan,C.chrome,C.deep},24)
+UI.keyNeon=NeonFlow.new(UI.keyField,"InputNeon",12,3.4,UI.keyGradient)
+UI.keyNeon.fill.ZIndex=1
+UI.keyIcon=label(UI.keyField,"KeyIcon","✦",UDim2.fromOffset(15,6),UDim2.fromOffset(27,48),24,C.light)
+UI.keyIcon.Active=false;UI.keyIcon.ZIndex=4
+UI.keyInput=make("TextBox",UI.keyField,{
+    Name="KeyInput",Position=UDim2.fromOffset(49,5),Size=UDim2.new(1,-62,1,-10),
+    BackgroundTransparency=1,ClearTextOnFocus=false,Text="",PlaceholderText="ENTER ACCESS KEY",
+    PlaceholderColor3=C.muted,TextColor3=C.white,TextSize=21,Font=Enum.Font.GothamMedium,
+    TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,
+    TextTruncate=Enum.TextTruncate.AtEnd,MultiLine=false
+})
+UI.keyInput.FontFace=OPTION_FONT
+UI.keyInput.ZIndex=5
+UI.keySubmit,UI.keySubmitFx=button(UI.keyHost,"VerifyAndLaunch",
+    UDim2.fromOffset(5,166),UDim2.new(1,-10,0,60))
+UI.keySubmit.Active=true
+UI.keySubmitCaption=label(UI.keySubmit,"ExecutableCaption","VERIFY & LAUNCH",
+    UDim2.fromOffset(14,0),UDim2.new(1,-28,1,0),20,C.white,OPTION_FONT)
+UI.keySubmitCaption.TextXAlignment=Enum.TextXAlignment.Center
+UI.keySubmitCaption.TextWrapped=true;UI.keySubmitCaption.Active=false;UI.keySubmitCaption.ZIndex=4
+UI.keyStatus=label(UI.keyHost,"StatusMessage","Enter your key to continue.",
+    UDim2.fromOffset(7,239),UDim2.new(1,-14,0,48),17,C.muted,OPTION_FONT)
+UI.keyStatus.TextWrapped=true;UI.keyStatus.TextTruncate=Enum.TextTruncate.None
+UI.keyStatus.ZIndex=4
+UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Remember access on this device",
+    UDim2.fromOffset(7,291),UDim2.new(1,-14,0,22),12,C.light,OPTION_FONT)
+
+-- Give other original tabs meaningful locked-state content instead of blank panes.
+for _,name in ipairs({"Visuals","Scripts","Settings"}) do
+    local page=pages[name]
+    local note=label(page,"LockedSection","Unlock Reyzn X to use "..name..".",
+        UDim2.fromOffset(10,8),UDim2.new(1,-24,0,60),19,C.muted,OPTION_FONT)
+    note.TextWrapped=true;note.TextTruncate=Enum.TextTruncate.None
+end
+UI.statusValue.Text="Locked"
+UI.statusDot.BackgroundColor3=C.violet
+UI.statusLabel.Text="Status"
+UI.versionValue.Text="KEY V1"
+
+-- Move labels into the existing original metallic press faces, just like
+-- the main Hub itself does for its action buttons.
+for _,record in ipairs(buttons) do
+    for _,child in ipairs(record.button:GetChildren()) do
+        if child:IsA("GuiObject") and child~=record.face then
+            child.Parent=record.face;child.ZIndex=4
+        end
+    end
+end
+local function setKeyStatus(message,kind)
+    if not state.alive then return end
+    UI.keyStatus.Text=message
+    UI.keyStatus.TextColor3=kind=="success" and C.green
+        or kind=="error" and C.pink
+        or kind=="busy" and C.cyan
+        or C.muted
+end
+local function setSubmitBusy(busy)
+    UI.keySubmit.Active=not busy
+    UI.keySubmit.Selectable=not busy
+    UI.keyInput.TextEditable=not busy
+    UI.keySubmitCaption.Text=busy and "LAUNCHING REYZN X..."
+        or authorized and "LAUNCH REYZN X"
+        or "VERIFY & LAUNCH"
+end
+local function launchOriginal()
+    if launching or not state.alive then return end
+    launching=true;setSubmitBusy(true)
+    UI.statusValue.Text="Loading"
+    setKeyStatus("Loading Reyzn X original...","busy")
+    spawn(function()
+        local ok,err=pcall(function()
+            if type(loadstring)~="function" then error("loadstring is unavailable",0) end
+            local body=game:HttpGet(ORIGINAL_HUB)
+            if type(body)~="string" or body:match("^%s*$") then error("Empty Hub source",0) end
+            local compiled,compileError=loadstring(body)
+            if type(compiled)~="function" then error(compileError or "Hub compilation failed",0) end
+            compiled()
         end)
-        if not running then return end
-        setBusy(false)
-        if success then
-            env.ReyznXKeySessionAuthorized = true
-            notice("ACCESS GRANTED  •  REYZN X LOADED", "success")
-            buttonText.Text = "ACCESS GRANTED"
-            task.delay(.7, function()
-                if running then shutdown() end
+        if not state.alive then return end
+        launching=false;setSubmitBusy(false)
+        if ok then
+            env.ReyznXKeySessionAuthorized=true
+            UI.statusValue.Text="Unlocked"
+            setKeyStatus("Access verified. Reyzn X launched.","success")
+            task.delay(.55,function()
+                if state.alive then destroyLoader() end
             end)
         else
-            gui.Enabled = true
-            root.Visible = true
-            launcher.Visible = false
-            notice("Couldn't launch Reyzn X. Tap LAUNCH to retry.", "error")
-            warn("Reyzn X Key Loader: " .. tostring(err))
+            UI.statusValue.Text="Retry"
+            setKeyStatus("Launch failed. Try again.","error")
+            warn("Reyzn X Key Loader: "..tostring(err))
+            UI.gui.Enabled=true
+            if state.target~="open" then
+                state.target="open";UI.window.Visible=true;UI.launcher.Visible=false
+                UI.windowFade.Value=1;UI.launcherFade.Value=0
+            end
         end
     end)
 end
-
-local function verify()
-    if not running or launching then return end
-    if authorized then
-        runOriginalHub()
+local function verifyKey()
+    if launching or not state.alive then return end
+    if authorized then launchOriginal();return end
+    local value=UI.keyInput.Text:match("^%s*(.-)%s*$")
+    if value=="" then
+        setKeyStatus("Enter your access key first.","error")
         return
     end
-    local entered = input.Text:match("^%s*(.-)%s*$")
-    if entered == "" then
-        notice("Enter your access key first.", "error")
-        return
-    end
-    if entered ~= KEY then
-        input.Text = ""
-        notice("INVALID KEY  •  TRY AGAIN", "error")
-        tween(inputStroke, .13, {Color = C.red, Transparency = 0})
-        task.delay(.8, function()
-            if running then tween(inputStroke, .2, {Color = C.metallic, Transparency = .25}) end
+    if value~=VALID_KEY then
+        UI.keyInput.Text=""
+        setKeyStatus("Invalid key. Please try again.","error")
+        tween(UI.keyStroke,.18,{Color=C.pink})
+        task.delay(.75,function()
+            if state.alive then tween(UI.keyStroke,.24,{Color=C.steel}) end
         end)
         return
     end
-    authorized = true
-    input.Text = ""
-    local stored = saveAccess()
-    if not stored then
-        warn("Reyzn X: This executor cannot persist the key. It may be requested on the next session.")
-    end
-    notice(stored and "Key verified and saved on this device."
-        or "Key verified for this session.", "success")
-    runOriginalHub()
+    authorized=true
+    saved=saveAuthorization()
+    UI.keyInput.Text=""
+    UI.statusValue.Text="Verified"
+    setKeyStatus(saved and "Access saved on this device." or
+        "Key accepted. Saving is unavailable on this executor.","success")
+    launchOriginal()
+end
+connect(UI.keySubmit.Activated,verifyKey)
+connect(UI.keyInput.FocusLost,function(enterPressed)
+    if enterPressed then verifyKey() end
+end)
+connect(UI.keyInput.Focused,function()
+    tween(UI.keyStroke,.19,{Transparency=.07})
+end)
+connect(UI.keyInput.FocusLost,function()
+    tween(UI.keyStroke,.20,{Transparency=.50})
+end)
+
+local layout={}
+local function applyPane()
+    if not layout.width then return end
+    local p=UI.paneProgress.Value
+    UI.reveal.Size=UDim2.fromOffset(layout.panelWidth*p,layout.height)
+    UI.reveal.Visible=p>.001
+    UI.window.Size=UDim2.fromOffset(layout.dockWidth+(layout.gap+layout.panelWidth)*p,layout.height)
+    UI.panel.Position=UDim2.fromOffset(4-12*(1-p),4)
+    UI.panelAura.host.Position=UDim2.fromOffset(layout.dockWidth+layout.gap+4,4)
+    UI.panelAura.host.Size=UDim2.fromOffset(math.max(0,layout.panelWidth*p-8),layout.height-8)
+    UI.panelAura.host.Visible=p>.03
+    UI.foldIcon.Rotation=180*(1-p)
+    UI.selectionLight.Visible=state.paneOpen
+    refreshAlpha()
+end
+local function applyPage()
+    pages[state.page].Position=UDim2.fromOffset(-8*(1-UI.pageFade.Value),0)
+    refreshAlpha()
+end
+local function recenter()
+    local v=UI.screen.AbsoluteSize
+    UI.window.Position=UDim2.fromOffset(math.floor((v.X-UI.window.Size.X.Offset)/2),math.floor((v.Y-layout.height)/2))
+    UI.launcher.Position=UDim2.fromOffset(18,math.max(12,math.floor(v.Y*.5-34)))
 end
 
-connect(button.Activated, verify)
-connect(input.FocusLost, function(enterPressed)
-    if enterPressed then verify() end
-end)
-connect(gui.Destroying, shutdown)
+local function resize(initial)
+    local v=UI.screen.AbsoluteSize
+    if v.X<1 or v.Y<1 then return end
+    -- Identical responsive window/dock/header sizing from Reyzn X Experimental.
+    layout.width=math.min(880,math.floor(v.X*(v.X<600 and .94 or .86)))
+    layout.height=math.min(420,math.floor(v.Y*.82))
+    layout.dockWidth=v.X<320 and 110 or (v.X<600 and 126 or 170)
+    layout.gap=8;layout.panelWidth=math.max(150,layout.width-layout.dockWidth-layout.gap)
+    local dw,h=layout.dockWidth,layout.height
+    UI.dock.Size=UDim2.fromOffset(dw,h)
+    UI.dockAura.host.Size=UDim2.fromOffset(dw,h)
+    UI.dockCrown.Visible=dw>=150
+    UI.brand.Position=UDim2.fromOffset(dw>=150 and 46 or 8,8)
+    UI.brand.Size=UDim2.fromOffset(dw-(dw>=150 and 52 or 16),44)
+    UI.brand.TextSize=dw>=150 and 25 or (dw<120 and 22 or 24)
+    local top=h<320 and 58 or 76
+    UI.dockDivider.Position=UDim2.fromOffset(14,top-12)
+    UI.dragArea.Size=UDim2.new(1,0,0,top-12)
+    UI.nav.Position=UDim2.fromOffset(9,top)
+    local available=h-top-60
+    local step=math.clamp(math.floor(available/5),30,50)
+    UI.nav.Size=UDim2.new(1,-18,0,available)
+    UI.nav.CanvasSize=UDim2.fromOffset(0,5*step)
+    layout.navStep=step
+    for _,n in pairs(navigation) do
+        n.button.Position=UDim2.fromOffset(0,(n.index-1)*step)
+        n.button.Size=UDim2.new(1,-3,0,step-5)
+        n.icon.Position=UDim2.fromOffset(dw>=150 and 12 or 8,(step-5-20)/2)
+        n.icon.Visible=dw>=120
+        n.caption.Position=UDim2.fromOffset(dw>=150 and 45 or (dw<120 and 12 or 36),0)
+        n.caption.Size=UDim2.new(1,dw>=150 and -51 or (dw<120 and -20 or -39),1,0)
+        n.caption.TextSize=dw>=150 and 19 or 17
+    end
+    UI.selectionLight.Position=UDim2.fromOffset(0,(navigation[state.page].index-1)*step+(step-23)/2)
+    local controlW=math.floor((dw-24-12)/3)
+    UI.controls.Size=UDim2.fromOffset(dw-24,36)
+    for i,name in ipairs({"Minimize","Collapse","Close"}) do
+        UI[name].Position=UDim2.fromOffset((i-1)*(controlW+6),0)
+        UI[name].Size=UDim2.fromOffset(controlW,36)
+        controlArtwork[name].glyph.Position=UDim2.fromOffset((controlW-22)/2,7)
+    end
+    UI.reveal.Position=UDim2.fromOffset(dw+layout.gap,0)
+    local pw=layout.panelWidth-8
+    UI.panel.Size=UDim2.fromOffset(pw,h-8)
+    local wide=pw>=440
+    local headerH=wide and 66 or (pw>=310 and 92 or 114)
+    UI.header.Size=UDim2.new(1,-32,0,headerH)
+    UI.header.Position=UDim2.fromOffset(16,0)
+    UI.pageTitle.Position=UDim2.fromOffset(0,wide and 6 or 4)
+    UI.pageTitle.Size=UDim2.fromOffset(wide and (pw>=570 and 116 or 80) or pw-32,wide and 54 or 36)
+    local profileY=wide and 17 or 44
+    local profileX=wide and (pw>=570 and 132 or 96) or 0
+    UI.avatarPlate.Position=UDim2.fromOffset(profileX,profileY)
+    UI.avatarPlate.Visible=pw>=160
+    UI.userID.Position=UDim2.fromOffset(profileX+41,profileY)
+    UI.userID.Size=UDim2.fromOffset(wide and pw-32-profileX-41-110 or math.max(84,pw-78),32)
+    UI.sessionDot.Position=UDim2.fromOffset(wide and pw-136 or (pw>=310 and pw-136 or 4),wide and 30 or (pw>=310 and 57 or 89))
+    UI.session.Position=UDim2.fromOffset(wide and pw-122 or (pw>=310 and pw-122 or 17),wide and 17 or (pw>=310 and 44 or 76))
+    UI.session.Size=UDim2.fromOffset(94,32)
+    if not wide and pw>=310 then UI.userID.Size=UDim2.fromOffset(pw-196,32) end
+    if pw<160 then UI.userID.Position=UDim2.fromOffset(0,profileY);UI.userID.Size=UDim2.fromOffset(pw-32,32) end
+    UI.panelDrag.Size=UDim2.new(1,0,0,headerH)
+    UI.headerLine.Position=UDim2.fromOffset(16,headerH)
+    UI.content.Position=UDim2.fromOffset(12,headerH+12)
+    UI.content.Size=UDim2.new(1,-24,1,-headerH-48)
+    local cw=pw-24
+    local targetWidth=math.max(222,math.min(440,cw-12))
+    UI.keyHost.Size=UDim2.fromOffset(targetWidth,314)
+    UI.keyHost.Position=UDim2.fromOffset(math.max(4,(cw-targetWidth)/2),4)
+    UI.keyLabel.TextSize=targetWidth<280 and 23 or 27
+    UI.keyCaption.TextSize=targetWidth<280 and 15 or 17
+    UI.keySubmitCaption.TextSize=targetWidth<280 and 18 or 20
+    UI.keyFooter.TextSize=targetWidth<280 and 11 or 12
+    pages.Main.ScrollingDirection=Enum.ScrollingDirection.XY
+    pages.Main.CanvasSize=UDim2.fromOffset(cw<targetWidth+10 and targetWidth+10 or 0,323)
+    for _,name in ipairs({"Visuals","Scripts","Settings"}) do
+        pages[name].CanvasSize=UDim2.fromOffset(0,100)
+    end
+    -- The original Home hero is untouched.
+    local narrow=cw<360
+    local heroHeight=narrow and 246 or math.min(262,math.max(156,h-8-headerH-54))
+    UI.hero.Size=UDim2.new(1,-8,0,heroHeight)
+    UI.heroTitle.TextSize=narrow and math.min(36,math.floor((cw-28)/3))
+        or math.min(50,math.floor(cw*.46/3))
+    UI.heroTitle.Position=UDim2.fromOffset(narrow and 14 or 22,narrow and 4 or 12)
+    UI.heroTitle.Size=UDim2.fromOffset(narrow and cw-36 or math.min(268,cw*.48),
+        narrow and 50 or math.min(96,heroHeight-92))
+    UI.emblemHost.Size=UDim2.fromOffset(narrow and math.min(cw-38,152) or math.min(cw*.43,232),
+        narrow and 104 or heroHeight-24)
+    UI.emblemHost.Position=narrow and UDim2.new(.5,-UI.emblemHost.Size.X.Offset/2,0,54)
+        or UDim2.new(1,-UI.emblemHost.Size.X.Offset-14,0,12)
+    UI.status.Position=UDim2.fromOffset(narrow and 14 or 22,narrow and 172 or heroHeight-84)
+    UI.status.Size=UDim2.fromOffset(narrow and cw-28 or math.min(206,cw*.46),58)
+    pages.Home.CanvasSize=UDim2.fromOffset(0,heroHeight+10)
+    applyPane();applyPage()
+    if initial then recenter() end
+end
 
-local startedAt = os.clock()
-connect(RunService.RenderStepped, function()
-    if not gui.Enabled or not root.Visible then return end
-    local t = os.clock() - startedAt
-    auraGradient.Offset = Vector2.new(math.sin(t * .42) * .35, 0)
-    shellChrome.Offset = Vector2.new(math.sin(t * .40 + .5) * .25, 0)
-    sideChrome.Offset = Vector2.new(math.sin(t * .47) * .34, 0)
-    panelChrome.Offset = Vector2.new(math.sin(t * .36 + 1.2) * .29, 0)
-    beamGradient.Offset = Vector2.new(math.sin(t * .55) * .37, 0)
-    buttonChrome.Offset = Vector2.new(math.sin(t * .75) * .35, 0)
-    inputChrome.Offset = Vector2.new(math.sin(t * .38) * .22, 0)
-    emblemGradient.Offset = Vector2.new(math.sin(t * .51) * .22, 0)
-    aura.BackgroundTransparency = .93 - .025 * math.sin(t * .58)^2
-    for _, spark in ipairs(sparks) do
-        local angle = spark.angle + t * .18
-        spark.frame.Position = UDim2.fromScale(.5 + .39 * math.cos(angle), .5 + .39 * math.sin(angle))
-        spark.frame.BackgroundTransparency = .58 - .25 * math.sin(t * .9 + spark.phase)^2
+local function setPane(open)
+    if state.target=="closed" then return end
+    state.paneOpen=open
+    UI.gui:SetAttribute("PanelOpen",open)
+    tween(UI.paneProgress,.32,{Value=open and 1 or 0})
+    UI.selectionLight.Visible=open
+end
+local function selectPage(name,collapse)
+    if state.target=="closed" then return end
+    if collapse and name==state.page and state.paneOpen then
+        setPane(false);return
+    end
+    local changed=state.page~=name
+    state.page=name
+    for other,page in pairs(pages) do page.Visible=other==name end
+    pages[name].CanvasPosition=Vector2.zero
+    UI.pageTitle.Text=name=="Main" and "Key System" or name
+    UI.pageTitle.FontFace=optionFont
+    for other,n in pairs(navigation) do
+        local selected=other==name
+        tween(n.fx.selection,.24,{Value=selected and 1 or 0})
+        tween(n.caption,.22,{TextColor3=selected and C.white or C.muted})
+        tintIcon(n.icon,selected and C.light or C.silver)
+    end
+    tween(UI.selectionLight,.22,{
+        Position=UDim2.fromOffset(0,(navigation[name].index-1)*layout.navStep+(layout.navStep-23)/2)
+    })
+    if changed then UI.pageFade.Value=0;tween(UI.pageFade,.24,{Value=1}) end
+    setPane(true)
+end
+for name,n in pairs(navigation) do
+    connect(n.button.Activated,function() selectPage(name,true) end)
+end
+connect(UI.Collapse.Activated,function() setPane(not state.paneOpen) end)
+connect(UI.paneProgress.Changed,applyPane)
+connect(UI.pageFade.Changed,applyPage)
+connect(UI.windowFade.Changed,refreshAlpha)
+connect(UI.launcherFade.Changed,function()
+    UI.launcherScale.Scale=.94+.06*UI.launcherFade.Value
+    refreshAlpha()
+end)
+connect(UI.zoom.Changed,function() UI.scale.Scale=UI.zoom.Value end)
+connect(UI.screen:GetPropertyChangedSignal("AbsoluteSize"),function() resize(false) end)
+local function transition(target)
+    if not state.alive or state.target=="closed" then return end
+    state.drag=nil
+    tween(UI.launcherPress,.16,{Scale=1})
+    state.target=target
+    state.burst=1
+    state.finishAt=os.clock()+.34
+    UI.window.Visible=target=="open"
+    UI.launcher.Visible=target=="minimized"
+    if target=="open" then
+        UI.window.Visible=true
+        tween(UI.windowFade,.28,{Value=1})
+        tween(UI.zoom,.32,{Value=1})
+        tween(UI.launcherFade,.2,{Value=0})
+    else
+        if target=="minimized" then UI.launcher.Visible=true end
+        tween(UI.windowFade,.25,{Value=0})
+        tween(UI.zoom,.30,{Value=.985})
+        tween(UI.launcherFade,.25,{Value=target=="minimized" and 1 or 0})
+    end
+    if target=="closed" then task.delay(.28,destroyLoader) end
+end
+connect(UI.Minimize.Activated,function() transition("minimized") end)
+connect(UI.Close.Activated,function() transition("closed") end)
+connect(UI.launcher.Activated,function() transition("open") end)
+connect(UI.recovery.Activated,function() recenter();transition("open") end)
+
+-- Exact same screen-delta draggable behavior as the full Hub.
+local function beginDrag(target,input)
+    if state.target=="closed" or state.drag then return end
+    local kind=input.UserInputType
+    if kind~=Enum.UserInputType.MouseButton1 and kind~=Enum.UserInputType.Touch then return end
+    state.drag={target=target,input=input,touch=kind==Enum.UserInputType.Touch,
+        start=input.Position,position=target.Position,moved=false}
+end
+connect(UI.dragArea.InputBegan,function(input) beginDrag(UI.window,input) end)
+connect(UI.panelDrag.InputBegan,function(input) beginDrag(UI.window,input) end)
+connect(UI.launcher.InputBegan,function(input)
+    beginDrag(UI.launcher,input)
+    if state.drag and state.drag.target==UI.launcher then
+        tween(UI.launcherPress,.12,{Scale=.965})
+    end
+end)
+connect(Input.InputChanged,function(input)
+    local drag=state.drag
+    if not drag then return end
+    if drag.touch and input~=drag.input then return end
+    if not drag.touch and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    local delta=input.Position-drag.start
+    if not drag.moved and delta.Magnitude<5 then return end
+    drag.moved=true
+    drag.target.Position=UDim2.new(drag.position.X.Scale,drag.position.X.Offset+delta.X,
+        drag.position.Y.Scale,drag.position.Y.Offset+delta.Y)
+    if drag.target==UI.launcher then state.launcherMoved=true end
+end)
+local function endDrag(input,force)
+    local drag=state.drag
+    if not drag then return end
+    if not force and ((drag.touch and input~=drag.input)
+        or (not drag.touch and input.UserInputType~=Enum.UserInputType.MouseButton1)) then return end
+    if drag.target==UI.launcher then tween(UI.launcherPress,.2,{Scale=1}) end
+    state.drag=nil
+end
+connect(Input.InputEnded,function(input) endDrag(input,false) end)
+connect(Input.WindowFocusReleased,function() endDrag(nil,true) end)
+connect(Input.InputBegan,function(input,processed)
+    if processed or Input:GetFocusedTextBox() then return end
+    if input.KeyCode==Enum.KeyCode.RightShift then
+        transition(state.target=="open" and "minimized" or "open")
     end
 end)
 
-if workspace.CurrentCamera then
-    connect(workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"), layout)
-end
-connect(workspace:GetPropertyChangedSignal("CurrentCamera"), function()
-    layout()
-end)
-layout()
 
-authorized = savedAccess() or env.ReyznXKeySessionAuthorized == true
-if authorized then
-    gui.Enabled = false
-    task.defer(function()
-        if running then runOriginalHub() end
+local ASSETS={
+    IconHome={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/icon-home-v1.png",file="ReyznX-icon-home-v1.png",bytes=1933132,images=artworkImages.IconHome},
+    IconMain={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/icon-main-v1.png",file="ReyznX-icon-main-v1.png",bytes=2142879,images=artworkImages.IconMain},
+    IconVisuals={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/icon-visuals-v1.png",file="ReyznX-icon-visuals-v1.png",bytes=1628114,images=artworkImages.IconVisuals},
+    IconScripts={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/icon-scripts-v1.png",file="ReyznX-icon-scripts-v1.png",bytes=2546120,images=artworkImages.IconScripts},
+    IconSettings={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/icon-settings-v1.png",file="ReyznX-icon-settings-v1.png",bytes=1892474,images=artworkImages.IconSettings},
+    Background={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/background-cyber-v2.jpg",file="ReyznX-background-cyber-v2.jpg",bytes=167325,format="jpeg",images=artworkImages.Background},
+    R={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/launcher-r-v1.png",file="ReyznX-launcher-r-v1.png",bytes=2136070,images={UI.launcherImage,UI.recoveryImage,UI.launcherShine}},
+    X={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/emblem-x-v1.png",file="ReyznX-emblem-x-v1.png",bytes=1699126,images=artworkImages.Emblem},
+    Fire={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/flame-wisp-v1.png",file="ReyznX-flame-wisp-v1.png",bytes=1172326,images=VFX.images},
+    Minimize={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/minimize-v1.png",file="ReyznX-minimize-v1.png",bytes=1283532,images={controlArtwork.Minimize.image,controlArtwork.Minimize.glow},rect={Vector2.new(260,101),Vector2.new(1253,680)}},
+    Collapse={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/collapse-v1.png",file="ReyznX-collapse-v1.png",bytes=1337784,images={controlArtwork.Collapse.image,controlArtwork.Collapse.glow},rect={Vector2.new(254,103),Vector2.new(1268,683)}},
+    Close={url="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/close-v1.png",file="ReyznX-close-v1.png",bytes=1570916,images={controlArtwork.Close.image,controlArtwork.Close.glow},rect={Vector2.new(187,84),Vector2.new(1401,713)}},
+}
+local function validArtwork(body,asset)
+    if type(body)~="string" or #body~=asset.bytes then return false end
+    -- The supplied background was named .png but contains original JPEG bytes.
+    -- Validate its real format; never silently reject it as a malformed PNG.
+    if asset.format=="jpeg" then return body:sub(1,3)=="\255\216\255" and body:sub(-2)=="\255\217" end
+    return body:sub(1,8)=="\137PNG\13\10\26\10" and body:sub(13,16)=="IHDR" and body:sub(-8,-5)=="IEND"
+end
+local function loadAsset(key,asset)
+    local customAsset=getcustomasset or getsynasset
+    if type(customAsset)~="function" or type(writefile)~="function" then
+        UI.gui:SetAttribute("Asset"..key,"unavailable")
+        warn("Reyzn X: custom artwork requires getcustomasset/getsynasset and writefile.")
+        return
+    end
+    local cached=false
+    if type(isfile)=="function" and type(readfile)=="function" then
+        local ok,body=pcall(function() if isfile(asset.file) then return readfile(asset.file) end end)
+        cached=ok and validArtwork(body,asset)
+    end
+    local uri
+    if cached then local ok,value=pcall(customAsset,asset.file);if ok and type(value)=="string" and value~="" then uri=value end end
+    if not uri then
+        for attempt=1,2 do
+            if not state.alive then return end
+            local url=asset.url
+            -- New notice images must not reuse a cached 404 from before they
+            -- were published. Valid local PNGs are still reused without HTTP.
+            if asset.refresh then url..="?build="..BUILD.."&t="..tostring(os.time()).."&attempt="..attempt end
+            local ok,body=pcall(function() return game:HttpGet(url) end)
+            if not state.alive then return end
+            if ok and validArtwork(body,asset) then
+                local wrote=pcall(writefile,asset.file,body)
+                if wrote then
+                    local registered,value=pcall(customAsset,asset.file)
+                    if registered and type(value)=="string" and value~="" then uri=value;break end
+                end
+            end
+            if attempt==1 then task.wait(.6) end
+        end
+    end
+    if not state.alive then return end
+    if not uri then UI.gui:SetAttribute("Asset"..key,"failed");warn("Reyzn X Key Loader: could not load the "..key.." artwork.");return end
+    for _,o in ipairs(asset.images) do
+        -- Use only the visible artwork region; original image bytes are unchanged.
+        if asset.rect then o.ImageRectOffset=asset.rect[1];o.ImageRectSize=asset.rect[2] end
+        o.Image=uri
+    end
+    UI.gui:SetAttribute("Asset"..key,"assigned")
+    -- Preloading runs separately from input, animation and the session clock.
+    pcall(function() ContentProvider:PreloadAsync(asset.images) end)
+end
+for key,asset in pairs(ASSETS) do spawn(function() loadAsset(key,asset) end) end
+
+
+-- Key Loader initialization: use exact art URLs, cache sizes and clipping.
+spawn(function()
+    local ok,uri=pcall(function()
+        return Players:GetUserThumbnailAsync(player.UserId,
+            Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size150x150)
     end)
-else
-    notice("Enter your key to unlock Reyzn X.", "normal")
+    if state.alive and ok and type(uri)=="string" and uri~="" then UI.avatar.Image=uri end
+end)
+local function updateClock()
+    local seconds=math.max(0,math.floor(os.clock()-startedAt))
+    if seconds~=state.lastSecond then
+        state.lastSecond=seconds
+        UI.session.Text=string.format("%02d:%02d:%02d",
+            math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
+    end
 end
+-- Preserve the selected Main tab and unchanged original navigation geometry.
+state.page="Main"
+UI.windowFade.Value=1
+UI.paneProgress.Value=1
+UI.pageFade.Value=1
+UI.launcherFade.Value=0
+UI.zoom.Value=1
+resize(true)
+selectPage("Main",false)
+UI.gui:SetAttribute("PanelOpen",true)
+UI.gui:SetAttribute("Minimized",false)
+UI.gui:SetAttribute("LocalKeyGate",true)
+updateClock()
+refreshAlpha()
+
+-- Auto-launch is allowed only for a matching saved key or this session's
+-- earlier explicit authorization. No remote validation in this V1 prototype.
+authorized=readAuthorization() or env.ReyznXKeySessionAuthorized==true
+saved=readAuthorization()
+if authorized then
+    UI.gui.Enabled=false
+    task.defer(function() if state.alive then launchOriginal() end end)
+end
+connect(RunService.Heartbeat,function(dt)
+    if not state.alive then return end
+    updateClock()
+    if state.finishAt>0 and os.clock()>=state.finishAt then
+        state.finishAt=0
+    end
+    state.budget+=dt
+    state.effectElapsed=(state.effectElapsed or 0)+dt
+    local interval=1/VFX_RATE
+    if state.budget<interval then return end
+    local elapsed=state.effectElapsed;state.effectElapsed=0
+    state.budget=state.budget%interval;state.phase+=elapsed
+    state.burst=math.max(0,state.burst-elapsed*3)
+    local p=state.phase
+    if not UI.gui.Enabled then return end
+    if UI.launcher.Visible then
+        UI.launcherAura:update(p,state.burst)
+        local cycle=p%5.1
+        local sweep=math.min(1,cycle/1.25)
+        UI.launcherSweep.Offset=Vector2.new(-1+2*sweep,0)
+        alpha(UI.launcherShine,"ImageTransparency",1-math.sin(sweep*math.pi)^2*.24)
+    end
+    VFX.reflections:update(elapsed)
+    if state.target=="minimized" then return end
+    UI.dockAura:update(p,state.burst)
+    if UI.panelAura.host.Visible then
+        UI.panelAura:update(p+.63,state.burst)
+    end
+    for _,fx in ipairs({UI.dockFx,UI.panelFx}) do
+        fx.inward:update(p,state.burst)
+        fx.neon:update(p,.105+.015*math.sin(p*.7)^2)
+        alpha(fx.beam,"BackgroundTransparency",.72-.12*state.burst)
+        fx.beamGradient.Offset=Vector2.new(math.sin(p*.18)*.34,0)
+    end
+    for _,record in ipairs(buttons) do
+        record.neon:update(p,.085+record.selection.Value*.11+record.energy.Value*.04)
+        record.selectedGradient.Offset=record.neon.wash.Offset
+    end
+    if state.page=="Home" and state.paneOpen then
+        UI.heroNeon:update(p,.085)
+        UI.emblemNeon:update(p,state.burst)
+    end
+    if state.page=="Main" and state.paneOpen then
+        UI.keyNeon:update(p,.09)
+    end
+    if p>=(state.assetPoll or 0) then
+        state.assetPoll=p+.25
+        UI.avatarFallback.Visible=UI.avatar.Image=="" or not UI.avatar.IsLoaded
+        UI.rFallback.Visible=UI.launcherImage.Image=="" or not UI.launcherImage.IsLoaded
+        UI.recoveryFallback.Visible=UI.recoveryImage.Image=="" or not UI.recoveryImage.IsLoaded
+        UI.xFallback.Visible=UI.xImage.Image=="" or not UI.xImage.IsLoaded
+        for name,control in pairs(controlArtwork) do
+            control.fallback.Visible=control.image.Image=="" or not control.image.IsLoaded
+        end
+        for _,sprite in ipairs(iconSprites) do
+            local ready=sprite.image.Image~="" and sprite.image.IsLoaded
+            for _,line in ipairs(sprite.fallback) do line.Visible=not ready end
+        end
+    end
+end)
+return UI.gui
