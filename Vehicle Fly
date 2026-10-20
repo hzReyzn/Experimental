@@ -1,7 +1,7 @@
--- REYZN VEHICLE FLY 1.0 | AMETHYST EDITION
+-- REYZN VEHICLE FLY 1.1 | COMPACT AMETHYST EDITION
 -- Standalone vehicle flight interface, based on authentic Reyzn X styling.
 -- Changes only hzReyzn/Experimental/Vehicle Fly, never Ghislain.
--- PC: WASD movement, E ascend, Q descend. Mobile: on-screen hold controls.
+-- Joystick / WASD: horizontal steering. E/Q or touch UP/DOWN: altitude.
 local Players = game:GetService("Players")
 local Input = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -305,7 +305,7 @@ end
 -- Standalone ScreenGui and animation scopes
 UI.gui=make("ScreenGui",playerGui,{Name="ReyznVehicleFly",ResetOnSpawn=false,DisplayOrder=67,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,IgnoreGuiInset=false})
 pcall(function() UI.gui.ScreenInsets=Enum.ScreenInsets.CoreUISafeInsets end)
-UI.gui:SetAttribute("Version","1.0")
+UI.gui:SetAttribute("Version","1.1")
 UI.gui:SetAttribute("Design","Reyzn X | Amethyst Edition")
 UI.gui:SetAttribute("FlightEnabled",false)
 UI.windowFade=make("NumberValue",UI.gui,{Name="WindowOpacity",Value=1})
@@ -314,7 +314,7 @@ UI.paneProgress=make("NumberValue",UI.gui,{Name="PaneProgress",Value=1})
 UI.pageFade=make("NumberValue",UI.gui,{Name="PageOpacity",Value=1})
 UI.zoom=make("NumberValue",UI.gui,{Name="Zoom",Value=1})
 UI.screen=frame(UI.gui,"SafeArea",UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1)
-UI.window=frame(UI.screen,"Window",UDim2.fromOffset(60,60),UDim2.fromOffset(650,405),nil,1,"window")
+UI.window=frame(UI.screen,"Window",UDim2.fromOffset(40,50),UDim2.fromOffset(348,238),nil,1,"window")
 UI.window.ZIndex=3
 UI.window.ClipsDescendants=false
 UI.scale=make("UIScale",UI.window,{Scale=1})
@@ -648,540 +648,443 @@ function FeatureToggle:update(time)
 end
 
 
-local active=true
-local session={seat=nil,root=nil,attachment=nil,linear=nil,orient=nil}
+
+-- Independent vehicle-flight state. ON means armed, even when not seated.
+local armed={seat=nil,root=nil,attachment=nil,velocity=nil,orientation=nil}
 local speed=95
-local keyboard,heldTouch={},{}
-local currentTab="Home"
-local collapsed=false
-local dragged=nil
+local heldTouch={}
+local heldKeys={}
+local activeMoveControls=nil
 local minimized=false
-local width=650
-local height=405
-local dockW=160
-local panelW=482
-local extras={}
-local function addConnection(signal,fn)
-    local c=signal:Connect(fn)
-    extras[#extras+1]=c
-    return c
-end
-local function stop()
-    local line,orient,attach=session.linear,session.orient,session.attachment
-    session.linear,session.orient,session.attachment=nil,nil,nil
-    session.seat,session.root=nil,nil
-    if line then line:Destroy() end
-    if orient then orient:Destroy() end
-    if attach then attach:Destroy() end
-    table.clear(keyboard);table.clear(heldTouch)
-    UI.gui:SetAttribute("FlightEnabled",false)
+local dragging=nil
+local lastStatus=""
+local alive=true
+
+local function removePhysics()
+    local oldVelocity,oldOrientation,oldAttachment=armed.velocity,armed.orientation,armed.attachment
+    armed.seat,armed.root,armed.attachment,armed.velocity,armed.orientation=nil,nil,nil,nil,nil
+    if oldVelocity then oldVelocity:Destroy() end
+    if oldOrientation then oldOrientation:Destroy() end
+    if oldAttachment then oldAttachment:Destroy() end
+    table.clear(heldTouch)
     if UI.pad then UI.pad.Visible=false end
 end
-local function getSeat()
-    local char=player.Character
-    local hum=char and char:FindFirstChildOfClass("Humanoid")
-    local seat=hum and hum.SeatPart
-    if not seat or not (seat:IsA("VehicleSeat") or seat:IsA("Seat")) or seat.Occupant~=hum then return nil,nil end
+
+local function seatedVehicle()
+    local character=player.Character
+    local humanoid=character and character:FindFirstChildOfClass("Humanoid")
+    local seat=humanoid and humanoid.SeatPart
+    if not seat or not (seat:IsA("VehicleSeat") or seat:IsA("Seat")) or seat.Occupant~=humanoid then
+        return nil,nil
+    end
     local root=seat.AssemblyRootPart or seat
-    if not seat:IsDescendantOf(workspace) or root.Anchored or seat.Anchored then return nil,nil end
+    if not seat:IsDescendantOf(workspace) or not root or root.Anchored or seat.Anchored then
+        return nil,nil
+    end
     return seat,root
 end
-local function start()
-    local seat,root=getSeat()
-    if not seat then
-        if UI.status then UI.status.Text="SIT IN A VEHICLE FIRST" end
-        return false
-    end
-    stop()
-    local attachment=Instance.new("Attachment")
-    attachment.Name="ReyznVehicleFly_Attachment"
-    attachment.Parent=root
+
+-- Camera-relative movement from Roblox's native controls:
+-- MoveVector is supplied by the mobile thumbstick and keyboard controls.
+task.defer(function()
+    local ok,controls=pcall(function()
+        local scripts=player:WaitForChild("PlayerScripts",8)
+        local module=scripts and scripts:WaitForChild("PlayerModule",8)
+        if not module then return nil end
+        return require(module):GetControls()
+    end)
+    if ok then activeMoveControls=controls end
+end)
+
+local function attachVehicle(seat,root)
+    removePhysics()
+    local attach=Instance.new("Attachment")
+    attach.Name="ReyznVehicleFly_Attachment"
+    attach.Parent=root
     local linear=Instance.new("LinearVelocity")
     linear.Name="ReyznVehicleFly_Velocity"
-    linear.Attachment0=attachment
+    linear.Attachment0=attach
     linear.RelativeTo=Enum.ActuatorRelativeTo.World
     linear.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector
-    linear.VectorVelocity=Vector3.zero
-    linear.MaxForce=math.huge
     pcall(function()linear.ForceLimitsEnabled=false end)
+    linear.MaxForce=math.huge
+    linear.VectorVelocity=Vector3.zero
     linear.Parent=root
-    local orient=Instance.new("AlignOrientation")
-    orient.Name="ReyznVehicleFly_Orientation"
-    orient.Attachment0=attachment
-    orient.Mode=Enum.OrientationAlignmentMode.OneAttachment
-    orient.MaxTorque=math.huge
-    orient.Responsiveness=20
-    orient.RigidityEnabled=false
-    orient.CFrame=root.CFrame.Rotation
-    orient.Parent=root
-    session={seat=seat,root=root,attachment=attachment,linear=linear,orient=orient}
-    UI.gui:SetAttribute("FlightEnabled",true)
+    local orientation=Instance.new("AlignOrientation")
+    orientation.Name="ReyznVehicleFly_Orientation"
+    orientation.Mode=Enum.OrientationAlignmentMode.OneAttachment
+    orientation.Attachment0=attach
+    orientation.MaxTorque=math.huge
+    orientation.Responsiveness=18
+    orientation.RigidityEnabled=false
+    orientation.CFrame=root.CFrame.Rotation
+    orientation.Parent=root
+    armed.seat,armed.root=seat,root
+    armed.attachment,armed.velocity,armed.orientation=attach,linear,orientation
     if UI.pad then UI.pad.Visible=Input.TouchEnabled end
-    if UI.status then UI.status.Text="FLIGHT ACTIVE  |  "..speed.." STUDS/S" end
     state.burst=1
-    return true
 end
+
 features.fly={enabled=false}
 function features.fly:setEnabled(value)
-    if value==self.enabled then return self.enabled end
-    if value then
-        self.enabled=start()
-    else
-        self.enabled=false
-        stop()
-        if UI.status then UI.status.Text="FLIGHT DISABLED" end
+    self.enabled=value==true
+    UI.gui:SetAttribute("FlightEnabled",self.enabled)
+    if not self.enabled then
+        removePhysics()
     end
     return self.enabled
 end
-function features.fly:destroy()self.enabled=false;stop()end
-features.camera={enabled=true}
-function features.camera:setEnabled(value)self.enabled=value==true;return self.enabled end
-function features.camera:destroy()end
-features.level={enabled=true}
-function features.level:setEnabled(value)self.enabled=value==true;return self.enabled end
-function features.level:destroy()end
+function features.fly:destroy()
+    self.enabled=false
+    removePhysics()
+end
 
--- Authentic Reyzn X dock / panel surfaces and chrome
-UI.dock,UI.dockFx=surface(UI.window,"Dock",UDim2.fromOffset(0,0),UDim2.fromOffset(160,405),"window")
-UI.panel,UI.panelFx=surface(UI.window,"Panel",UDim2.fromOffset(168,0),UDim2.fromOffset(482,405),"pane")
-UI.dock.ZIndex=3
+-- A single compact Reyzn X panel, retaining authentic original visual helpers.
+UI.panel,UI.panelFx=surface(UI.window,"AmethystPanel",UDim2.fromOffset(0,0),UDim2.fromOffset(348,238),"window")
 UI.panel.ZIndex=3
-UI.crown=icon(UI.dock,"crown",UDim2.fromOffset(15,16),22,C.light)
-UI.crown.ZIndex=4
-UI.brand=brandText(UI.dock,"Brand",UDim2.fromOffset(43,6),UDim2.fromOffset(116,47),25)
-UI.brand.ZIndex=4
-UI.dragArea=frame(UI.dock,"DockDrag",UDim2.fromOffset(0,0),UDim2.new(1,0,0,59),nil,1)
-UI.dragArea.Active=true;UI.dragArea.ZIndex=7
-local div=frame(UI.dock,"Division",UDim2.fromOffset(12,63),UDim2.new(1,-24,0,1),C.line,.2)
-gradient(div,{C.black,C.violet,C.black},0)
-UI.nav=frame(UI.dock,"Nav",UDim2.fromOffset(9,77),UDim2.new(1,-18,1,-139),nil,1)
-UI.nav.ZIndex=4
-local navigation={}
-local pageNames={{"Home","home"},{"Flight","spark"},{"Settings","settings"}}
-for index,item in ipairs(pageNames)do
-    local b,fx=button(UI.nav,"Tab_"..item[1],UDim2.fromOffset(0,(index-1)*53),UDim2.new(1,-3,0,44))
-    local glyph=icon(b,item[2],UDim2.fromOffset(9,10),22,C.silver)
-    local caption=label(b,"Caption",item[1],UDim2.fromOffset(42,0),UDim2.new(1,-44,1,0),19,C.muted,OPTION_FONT)
-    caption.ZIndex=4
-    navigation[item[1]]={button=b,fx=fx,icon=glyph,caption=caption,index=index}
-end
-UI.selectionLight=frame(UI.nav,"SelectionLight",UDim2.fromOffset(0,11),UDim2.fromOffset(2,21),C.chrome,.02)
-corner(UI.selectionLight,2);UI.selectionLight.ZIndex=5
-gradient(UI.selectionLight,{C.violet,C.cyan,C.chrome},90)
+UI.fire=UpdraftFire.new(UI.window,"AmethystFire","window",348,238,true,{5,8,5,8})
+UI.header=label(UI.panel,"Title","VEHICLE FLY",UDim2.fromOffset(17,7),UDim2.new(1,-111,0,35),23,C.white,OPTION_FONT)
+UI.header.ZIndex=5
+local topLine=frame(UI.panel,"HeaderLine",UDim2.fromOffset(17,44),UDim2.new(1,-34,0,1),C.violet,.38)
+topLine.ZIndex=5
+gradient(topLine,{C.deep,C.violet,C.cyan,C.deep},0)
+UI.dragBar=frame(UI.panel,"DragBar",UDim2.fromOffset(0,0),UDim2.new(1,-100,0,46),nil,1)
+UI.dragBar.ZIndex=8
+UI.dragBar.Active=true
 
-UI.dockControls=frame(UI.dock,"WindowControls",UDim2.new(0,10,1,-49),UDim2.new(1,-20,0,37),nil,1)
-UI.dockControls.ZIndex=4
-for index,item in ipairs({{"Minimize","minimize"},{"Collapse","fold"},{"Close","close"}})do
-    local b,fx=button(UI.dockControls,item[1],UDim2.fromOffset((index-1)*47,0),UDim2.fromOffset(39,35))
-    local iconItem=icon(b,item[2],UDim2.fromOffset(8,6),22,C.silver)
-    iconItem.ZIndex=4
-    UI[item[1]]=b
-end
-
-UI.header=label(UI.panel,"Header","Vehicle Fly",UDim2.fromOffset(20,8),UDim2.new(1,-40,0,48),24,C.white,OPTION_FONT)
-UI.header.ZIndex=4
-UI.panelDrag=frame(UI.panel,"PanelDrag",UDim2.fromOffset(0,0),UDim2.new(1,0,0,60),nil,1)
-UI.panelDrag.Active=true;UI.panelDrag.ZIndex=7
-local headerLine=frame(UI.panel,"HeaderLine",UDim2.fromOffset(18,66),UDim2.new(1,-36,0,1),C.line,.2)
-gradient(headerLine,{C.steel,C.violet,C.silver},0)
-UI.content=frame(UI.panel,"PageContent",UDim2.fromOffset(14,78),UDim2.new(1,-28,1,-113),nil,1)
-UI.content.ZIndex=4;UI.content.ClipsDescendants=true
-local madeBy=label(UI.panel,"Credit","Made By Reyzn",UDim2.new(0,18,1,-28),UDim2.new(1,-36,0,20),11,C.muted)
-madeBy.TextXAlignment=Enum.TextXAlignment.Right;madeBy.ZIndex=4
-local pages={}
-for _,name in ipairs({"Home","Flight","Settings"})do
-    pages[name]=make("ScrollingFrame",UI.content,{
-        Name="Page_"..name,Position=UDim2.fromOffset(0,0),Size=UDim2.fromScale(1,1),
-        BackgroundTransparency=1,ScrollBarThickness=3,ScrollBarImageColor3=C.violet,
-        ScrollBarImageTransparency=.5,CanvasSize=UDim2.fromOffset(0,450),
-        Active=true,ScrollingEnabled=true,ClipsDescendants=true,Visible=name=="Home"
-    },"page")
-    pages[name].ZIndex=4
-end
-
-local hero=frame(pages.Home,"Hero",UDim2.fromOffset(2,2),UDim2.new(1,-10,0,215),C.base)
-hero.ZIndex=4;corner(hero,13)
-gradient(hero,{Color3.fromRGB(28,22,40),C.black,Color3.fromRGB(26,17,39)},32)
-local heroEdge=stroke(hero,C.chrome,.53,1)
-local heroMetal=gradient(heroEdge,{C.violet,C.cyan,C.silver,C.deep},28)
-UI.heroNeon=NeonFlow.new(hero,"HeroNeon",12,4.6,heroMetal)
-UI.heroTitle=brandText(hero,"HeroTitle",UDim2.fromOffset(16,10),UDim2.fromOffset(195,76),47)
-UI.heroTitle.ZIndex=6
-UI.heroStatus=label(hero,"Status","VEHICLE FLY\nStatus: Waiting for vehicle",UDim2.fromOffset(14,105),UDim2.new(1,-25,0,72),17,C.silver,OPTION_FONT)
-UI.heroStatus.ZIndex=6;UI.heroStatus.TextWrapped=true;UI.heroStatus.TextTruncate=Enum.TextTruncate.None
-local help=label(pages.Home,"Directions","Sit in the driver's seat, open FLIGHT and tap Vehicle Fly.\n\nPC: W A S D to move, E up, Q down.\nMobile: hold the floating control buttons.",UDim2.fromOffset(12,230),UDim2.new(1,-24,0,137),18,C.muted,OPTION_FONT)
-help.TextWrapped=true;help.TextTruncate=Enum.TextTruncate.None
-
-UI.status=label(pages.Flight,"FlightStatus","SIT IN A VEHICLE FIRST",UDim2.fromOffset(8,0),UDim2.new(1,-16,0,30),17,C.cyan,OPTION_FONT)
-UI.status.ZIndex=5
-UI.flightToggle=FeatureToggle.new(pages.Flight,"VehicleFly","Vehicle Fly",features.fly)
-UI.flightToggle.button.Position=UDim2.fromOffset(5,36)
-UI.speedTitle=label(pages.Flight,"SpeedTitle","FLIGHT SPEED",UDim2.fromOffset(12,140),UDim2.new(1,-24,0,30),20,C.white,OPTION_FONT)
-UI.speedTitle.ZIndex=5
-local function actionButton(parent,name,text,x,y,w,h)
+local function compactButton(parent,name,title,x,y,w,h)
     local b,fx=button(parent,name,UDim2.fromOffset(x,y),UDim2.fromOffset(w,h))
-    b.Active=true
-    local caption=label(b,"Caption",text,UDim2.fromScale(0,0),UDim2.fromScale(1,1),21,C.white,OPTION_FONT)
-    caption.ZIndex=4;caption.TextXAlignment=Enum.TextXAlignment.Center;caption.Active=false
+    local text=label(b,"Caption",title,UDim2.fromScale(0,0),UDim2.fromScale(1,1),18,C.white,OPTION_FONT)
+    text.TextXAlignment=Enum.TextXAlignment.Center
+    text.ZIndex=6
+    text.Active=false
     return b,fx
 end
-UI.minus=actionButton(pages.Flight,"SpeedMinus","−",12,176,54,49)
-UI.plus=actionButton(pages.Flight,"SpeedPlus","+",195,176,54,49)
-UI.speedValue=label(pages.Flight,"SpeedValue",tostring(speed),UDim2.fromOffset(78,177),UDim2.fromOffset(104,47),24,C.chrome,Enum.Font.RobotoMono)
-UI.speedValue.ZIndex=5;UI.speedValue.TextXAlignment=Enum.TextXAlignment.Center
-local units=label(pages.Flight,"Units","STUDS PER SECOND",UDim2.fromOffset(12,233),UDim2.new(1,-20,0,26),15,C.muted,OPTION_FONT)
-local hint=label(pages.Flight,"KeyHint","WASD: MOVE    E: UP    Q: DOWN\nTouch controls appear while flying on mobile.",UDim2.fromOffset(12,273),UDim2.new(1,-24,0,65),17,C.muted,OPTION_FONT)
-hint.TextWrapped=true;hint.TextTruncate=Enum.TextTruncate.None
-local function speedChange(steps)
-    speed=math.clamp(speed+steps,20,320)
+UI.minButton=compactButton(UI.panel,"Minimize","−",263,9,34,30)
+UI.closeButton=compactButton(UI.panel,"Close","×",302,9,34,30)
+UI.minButton.ZIndex=9
+UI.closeButton.ZIndex=9
+
+UI.flightToggle=FeatureToggle.new(UI.panel,"VehicleFly","Vehicle Fly",features.fly)
+UI.flightToggle.button.Position=UDim2.fromOffset(13,58)
+UI.flightToggle:resize(334)
+
+local speedName=label(UI.panel,"SpeedName","SPEED",UDim2.fromOffset(17,136),UDim2.fromOffset(104,23),16,C.silver,OPTION_FONT)
+speedName.ZIndex=5
+UI.speedMinus=compactButton(UI.panel,"SpeedMinus","−",123,130,46,35)
+UI.speedValue=label(UI.panel,"SpeedValue",tostring(speed),UDim2.fromOffset(173,133),UDim2.fromOffset(72,31),20,C.chrome,Enum.Font.RobotoMono)
+UI.speedValue.TextXAlignment=Enum.TextXAlignment.Center
+UI.speedValue.ZIndex=5
+UI.speedPlus=compactButton(UI.panel,"SpeedPlus","+",249,130,46,35)
+local function changeSpeed(diff)
+    speed=math.clamp(speed+diff,20,320)
     UI.speedValue.Text=tostring(speed)
     UI.gui:SetAttribute("FlightSpeed",speed)
 end
-connect(UI.minus.Activated,function()speedChange(-15)end)
-connect(UI.plus.Activated,function()speedChange(15)end)
+connect(UI.speedMinus.Activated,function()changeSpeed(-15)end)
+connect(UI.speedPlus.Activated,function()changeSpeed(15)end)
+UI.gui:SetAttribute("FlightSpeed",speed)
 
-UI.cameraToggle=FeatureToggle.new(pages.Settings,"CameraSteering","Camera Steering",features.camera)
-UI.cameraToggle.button.Position=UDim2.fromOffset(5,7)
-UI.cameraToggle:setEnabled(true)
-UI.levelToggle=FeatureToggle.new(pages.Settings,"AutoLevel","Auto Level",features.level)
-UI.levelToggle.button.Position=UDim2.fromOffset(5,87)
-UI.levelToggle:setEnabled(true)
-local note=label(pages.Settings,"Notice",
-    "Vehicle flight is client-side. It depends on network ownership and the game's vehicle physics. Leaving the seat ends flight automatically.",
-    UDim2.fromOffset(12,184),UDim2.new(1,-24,0,105),17,C.muted,OPTION_FONT)
-note.TextWrapped=true;note.TextTruncate=Enum.TextTruncate.None
+UI.status=label(UI.panel,"Status","OFF",UDim2.fromOffset(17,184),UDim2.new(1,-34,0,29),16,C.cyan,OPTION_FONT)
+UI.status.ZIndex=5
+UI.status.TextXAlignment=Enum.TextXAlignment.Center
 
--- Original animated updraft and icon launcher
+-- Minimized Reyzn R launcher, independent of the panel.
 UI.launcher=make("ImageButton",UI.screen,{
-    Name="Launcher",Image="",BackgroundTransparency=1,Size=UDim2.fromOffset(68,68),
-    Position=UDim2.fromOffset(18,158),AutoButtonColor=false,Selectable=true,Visible=false
+    Name="ReyznLauncher",Image="",BackgroundTransparency=1,
+    Position=UDim2.fromOffset(16,152),Size=UDim2.fromOffset(58,58),
+    AutoButtonColor=false,Visible=false,Selectable=true
 },"launcher")
-UI.launcher.ZIndex=12
-UI.launcherPress=make("UIScale",UI.launcher,{Scale=1})
-UI.logoFallback=label(UI.launcher,"LogoFallback","R",UDim2.fromScale(0,0),UDim2.fromScale(1,1),35,C.white,Enum.Font.GothamBold)
-UI.logoFallback.TextXAlignment=Enum.TextXAlignment.Center;UI.logoFallback.ZIndex=13
-UI.logo=imageLabel(UI.launcher,"OriginalLauncherR",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
-UI.logo.ImageRectOffset=Vector2.new(88,104)
-UI.logo.ImageRectSize=Vector2.new(1080,1040)
-UI.logo.ZIndex=13
-UI.dockAura=UpdraftFire.new(UI.window,"DockAura","window",160,405,true,{4,6,3,6})
-UI.panelAura=UpdraftFire.new(UI.window,"PanelAura","pane",482,405,true,{12,6,9,6})
-UI.launcherAura=UpdraftFire.new(UI.launcher,"LauncherAura","launcher",68,68,false)
+UI.launcher.ZIndex=15
+local launcherFace=frame(UI.launcher,"LauncherFace",UDim2.fromScale(0,0),UDim2.fromScale(1,1),C.black,.12)
+corner(launcherFace,16)
+stroke(launcherFace,C.violet,.22,1.5)
+gradient(launcherFace,{C.panel,C.deep,C.black},55)
+UI.launcherLetter=label(UI.launcher,"R","R",UDim2.fromScale(0,0),UDim2.fromScale(1,1),32,C.white,Enum.Font.GothamBold)
+UI.launcherLetter.TextXAlignment=Enum.TextXAlignment.Center
+UI.launcherLetter.ZIndex=17
+UI.launcherImage=imageLabel(UI.launcher,"OriginalLogo",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+UI.launcherImage.ImageRectOffset=Vector2.new(88,104)
+UI.launcherImage.ImageRectSize=Vector2.new(1080,1040)
+UI.launcherImage.ZIndex=17
+UI.launcherFire=UpdraftFire.new(UI.launcher,"LauncherFire","launcher",58,58,false)
 
--- Touch pad is separate from the movable window.
-UI.pad=frame(UI.screen,"MobileFlightPad",UDim2.new(1,-268,1,-210),UDim2.fromOffset(255,195),C.base,.16,"fixed")
-UI.pad.ZIndex=15;UI.pad.Visible=false
+-- Only UP and DOWN float on screen. Horizontal motion uses the native joystick.
+UI.pad=frame(UI.screen,"AltitudeControls",UDim2.new(1,-198,1,-96),UDim2.fromOffset(186,74),C.base,.21,"fixed")
+UI.pad.Visible=false
+UI.pad.ZIndex=20
 corner(UI.pad,13)
-local padStroke=stroke(UI.pad,C.light,.45,1)
-gradient(padStroke,{C.violet,C.cyan,C.silver,C.deep},25)
-local padTitle=label(UI.pad,"PadTitle","REYZN VEHICLE FLIGHT",UDim2.fromOffset(8,1),UDim2.new(1,-16,0,23),13,C.silver,OPTION_FONT)
-padTitle.TextXAlignment=Enum.TextXAlignment.Center;padTitle.ZIndex=16
-local touchData={
-    {"forward","W",76,26,60,52},
-    {"left","A",10,79,60,52},
-    {"right","D",141,79,60,52},
-    {"back","S",76,132,60,52},
-    {"up","UP",207,26,43,52},
-    {"down","DN",207,132,43,52},
-}
-for _,data in ipairs(touchData)do
-    local action,display,x,y,w,h=unpack(data)
-    local b,fx=actionButton(UI.pad,"Touch_"..action,display,x,y,w,h)
-    b.ZIndex=16
+local padEdge=stroke(UI.pad,C.violet,.26,1.3)
+gradient(padEdge,{C.violet,C.cyan,C.silver,C.deep},25)
+local padFx=NeonFlow.new(UI.pad,"PadNeon",12,5.3,nil)
+UI.upButton,UI.upEffect=compactButton(UI.pad,"Up","UP",8,9,81,54)
+UI.downButton,UI.downEffect=compactButton(UI.pad,"Down","DOWN",97,9,81,54)
+UI.upButton.ZIndex=23
+UI.downButton.ZIndex=23
+for _,item in ipairs({{"up",UI.upButton,UI.upEffect},{"down",UI.downButton,UI.downEffect}})do
+    local action,b,fx=item[1],item[2],item[3]
     connect(b.InputBegan,function(input)
         if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
             heldTouch[action]=input
-            tween(fx.selection,.12,{Value=1})
+            tween(fx.selection,.14,{Value=1})
         end
     end)
     connect(Input.InputEnded,function(input)
-        if heldTouch[action]==input or (heldTouch[action] and heldTouch[action].UserInputType==Enum.UserInputType.MouseButton1
+        local held=heldTouch[action]
+        if held==input or (held and held.UserInputType==Enum.UserInputType.MouseButton1
             and input.UserInputType==Enum.UserInputType.MouseButton1) then
             heldTouch[action]=nil
-            tween(fx.selection,.16,{Value=0})
+            tween(fx.selection,.17,{Value=0})
         end
     end)
 end
-local binds={
+
+-- Dedicated keyboard fallback for WASD, and E/Q for altitude.
+local keys={
     [Enum.KeyCode.W]="forward",[Enum.KeyCode.Up]="forward",
     [Enum.KeyCode.S]="back",[Enum.KeyCode.Down]="back",
     [Enum.KeyCode.A]="left",[Enum.KeyCode.Left]="left",
     [Enum.KeyCode.D]="right",[Enum.KeyCode.Right]="right",
-    [Enum.KeyCode.E]="up",[Enum.KeyCode.Q]="down",
+    [Enum.KeyCode.E]="up",[Enum.KeyCode.Q]="down"
 }
 connect(Input.InputBegan,function(input,processed)
     if processed or Input:GetFocusedTextBox() then return end
     if input.UserInputType==Enum.UserInputType.Keyboard then
-        local action=binds[input.KeyCode]
-        if action then keyboard[input.KeyCode]=action end
+        local direction=keys[input.KeyCode]
+        if direction then heldKeys[input.KeyCode]=direction end
     end
 end)
 connect(Input.InputEnded,function(input)
-    if input.UserInputType==Enum.UserInputType.Keyboard then keyboard[input.KeyCode]=nil end
+    if input.UserInputType==Enum.UserInputType.Keyboard then heldKeys[input.KeyCode]=nil end
 end)
 connect(Input.WindowFocusReleased,function()
-    table.clear(keyboard)
+    table.clear(heldKeys)
     table.clear(heldTouch)
 end)
-local function pressed(action)
+local function keyHeld(action)
     if heldTouch[action] then return true end
-    for _,value in pairs(keyboard)do if value==action then return true end end
+    for _,v in pairs(heldKeys)do
+        if v==action then return true end
+    end
     return false
 end
-connect(RunService.Heartbeat,function(dt)
-    if not features.fly.enabled then return end
-    local seat,root=getSeat()
-    if seat~=session.seat or root~=session.root or not session.linear or not session.linear.Parent
-       or not session.attachment or not session.attachment.Parent then
-        UI.flightToggle:setEnabled(false)
-        UI.status.Text="FLIGHT STOPPED | EXITED VEHICLE"
+
+local function horizontalInput()
+    -- Roblox PlayerModule is shared by joystick and keyboard.
+    if activeMoveControls then
+        local ok,m=pcall(function()return activeMoveControls:GetMoveVector()end)
+        if ok and typeof(m)=="Vector3" then
+            local x,z=math.clamp(m.X,-1,1),math.clamp(m.Z,-1,1)
+            if x*x+z*z>.005 then return x,-z end
+        end
+    end
+    -- Keyboard fallback if the controls module is unavailable.
+    local x=(keyHeld("right") and 1 or 0)-(keyHeld("left") and 1 or 0)
+    local f=(keyHeld("forward") and 1 or 0)-(keyHeld("back") and 1 or 0)
+    if x~=0 or f~=0 then return x,f end
+    -- Humanoid movement is a backup for custom mobile thumbsticks.
+    local char=player.Character
+    local hum=char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.MoveDirection.Magnitude>.05 then
+        local cam=workspace.CurrentCamera
+        if cam then
+            local right=cam.CFrame.RightVector
+            local forward=cam.CFrame.LookVector
+            return hum.MoveDirection:Dot(right),hum.MoveDirection:Dot(Vector3.new(forward.X,0,forward.Z).Unit)
+        end
+    end
+    return 0,0
+end
+
+connect(RunService.Heartbeat,function()
+    if not features.fly.enabled then
+        if armed.root then removePhysics() end
         return
     end
-    local camera=workspace.CurrentCamera
-    local f=(camera and camera.CFrame.LookVector) or root.CFrame.LookVector
-    local r=(camera and camera.CFrame.RightVector) or root.CFrame.RightVector
-    local front=Vector3.new(f.X,0,f.Z)
-    local right=Vector3.new(r.X,0,r.Z)
-    if front.Magnitude<.01 then
-        local original=root.CFrame.LookVector
-        front=Vector3.new(original.X,0,original.Z)
+    local seat,root=seatedVehicle()
+    if not seat then
+        if armed.root then removePhysics() end
+        return -- remain ARMED for the next seat
     end
-    if front.Magnitude<.01 then front=Vector3.new(0,0,-1) end
-    front=front.Unit
-    if right.Magnitude<.01 then right=Vector3.new(-front.Z,0,front.X) end
-    right=right.Unit
-    local forward=(pressed("forward") and 1 or 0)-(pressed("back") and 1 or 0)
-    local sideways=(pressed("right") and 1 or 0)-(pressed("left") and 1 or 0)
-    local up=(pressed("up") and 1 or 0)-(pressed("down") and 1 or 0)
-    local desired=front*forward+right*sideways+Vector3.new(0,up,0)
-    if desired.Magnitude>1 then desired=desired.Unit end
-    session.linear.VectorVelocity=desired*speed
-    if session.orient then
-        session.orient.Enabled=features.level.enabled
-        if features.level.enabled then
-            local target=front
-            if not features.camera.enabled then
-                local facing=root.CFrame.LookVector
-                local flat=Vector3.new(facing.X,0,facing.Z)
-                if flat.Magnitude>.01 then target=flat.Unit end
-            end
-            session.orient.CFrame=CFrame.lookAt(Vector3.zero,target,Vector3.yAxis)
-        end
+    if armed.seat~=seat or armed.root~=root or not armed.velocity or not armed.velocity.Parent then
+        attachVehicle(seat,root)
+    end
+    if not armed.velocity then return end
+    local camera=workspace.CurrentCamera
+    local look=camera and camera.CFrame.LookVector or root.CFrame.LookVector
+    local right=camera and camera.CFrame.RightVector or root.CFrame.RightVector
+    local forward=Vector3.new(look.X,0,look.Z)
+    if forward.Magnitude<.001 then forward=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z) end
+    if forward.Magnitude<.001 then forward=Vector3.new(0,0,-1) end
+    forward=forward.Unit
+    local side=Vector3.new(right.X,0,right.Z)
+    if side.Magnitude<.001 then side=Vector3.new(-forward.Z,0,forward.X) end
+    side=side.Unit
+    local x,z=horizontalInput()
+    local altitude=(keyHeld("up") and 1 or 0)-(keyHeld("down") and 1 or 0)
+    local direction=side*x+forward*z+Vector3.new(0,altitude,0)
+    if direction.Magnitude>1 then direction=direction.Unit end
+    armed.velocity.VectorVelocity=direction*speed
+    if armed.orientation then
+        armed.orientation.CFrame=CFrame.lookAt(Vector3.zero,forward,Vector3.yAxis)
     end
 end)
 
-local function choose(name)
-    currentTab=name
-    UI.header.Text=name=="Flight" and "Vehicle Fly" or name
-    for other,n in pairs(navigation)do
-        local selected=other==name
-        n.fx.selected=selected
-        tween(n.fx.selection,.23,{Value=selected and 1 or 0})
-        tween(n.caption,.2,{TextColor3=selected and C.white or C.muted})
-        tintIcon(n.icon,selected and C.light or C.silver)
-    end
-    tween(UI.selectionLight,.22,{Position=UDim2.fromOffset(0,(navigation[name].index-1)*53+10)})
-    for other,page in pairs(pages)do page.Visible=(other==name) end
-    UI.pageFade.Value=.1;tween(UI.pageFade,.23,{Value=1})
-end
-for name,n in pairs(navigation)do connect(n.button.Activated,function()choose(name)end)end
-local function resize(initial)
+-- Smaller resizable-safe single window. No pages, nav list or extra settings.
+local function adjustLayout(initial)
     local vp=UI.screen.AbsoluteSize
-    if vp.X<1 or vp.Y<1 then return end
-    width=math.min(740,math.floor(vp.X*(vp.X<600 and .95 or .88)))
-    height=math.min(435,math.floor(vp.Y*.85))
-    dockW=vp.X<620 and 126 or 160
-    panelW=math.max(180,width-dockW-8)
-    UI.window.Size=UDim2.fromOffset(collapsed and dockW or width,height)
-    UI.dock.Size=UDim2.fromOffset(dockW,height)
-    UI.panel.Position=UDim2.fromOffset(dockW+8,0)
-    UI.panel.Size=UDim2.fromOffset(panelW,height)
-    UI.panel.Visible=not collapsed
-    UI.dockAura.host.Size=UI.dock.Size
-    UI.panelAura.host.Position=UI.panel.Position
-    UI.panelAura.host.Size=UI.panel.Size
-    UI.panelAura.host.Visible=not collapsed
-    UI.brand.Position=UDim2.fromOffset(dockW>=150 and 43 or 10,6)
-    UI.brand.Size=UDim2.fromOffset(dockW>=150 and 108 or 100,43)
-    UI.crown.Visible=dockW>=150
-    local controlW=math.floor((dockW-34)/3)
-    for i,name in ipairs({"Minimize","Collapse","Close"})do
-        UI[name].Position=UDim2.fromOffset((i-1)*(controlW+5),0)
-        UI[name].Size=UDim2.fromOffset(controlW,35)
+    if vp.X<=1 or vp.Y<=1 then
+        local camera=workspace.CurrentCamera
+        vp=camera and camera.ViewportSize or Vector2.new(900,560)
     end
-    UI.nav.Size=UDim2.new(1,-18,1,-139)
-    local toggleWidth=math.max(134,panelW-42)
-    UI.flightToggle:resize(toggleWidth)
-    UI.cameraToggle:resize(toggleWidth)
-    UI.levelToggle:resize(toggleWidth)
-    UI.levelToggle.button.Position=UDim2.fromOffset(5,UI.cameraToggle.button.Size.Y.Offset+27)
-    local adjustment=UI.flightToggle.button.Size.Y.Offset-60
-    UI.speedTitle.Position=UDim2.fromOffset(12,140+adjustment)
-    UI.minus.Position=UDim2.fromOffset(12,176+adjustment)
-    UI.plus.Position=UDim2.fromOffset(math.max(143,math.min(195,panelW-112)),176+adjustment)
-    UI.speedValue.Position=UDim2.fromOffset(75,177+adjustment)
-    units.Position=UDim2.fromOffset(12,233+adjustment)
-    hint.Position=UDim2.fromOffset(12,273+adjustment)
-    pages.Flight.CanvasSize=UDim2.fromOffset(0,395+adjustment)
-    pages.Home.CanvasSize=UDim2.fromOffset(0,390)
-    pages.Settings.CanvasSize=UDim2.fromOffset(0,340)
+    local factor=math.min(1,math.max(.70,(vp.X-20)/348),math.max(.70,(vp.Y-30)/238))
+    UI.scale.Scale=factor
+    UI.window.Size=UDim2.fromOffset(348,238)
+    UI.panel.Size=UDim2.fromOffset(348,238)
+    UI.fire.host.Size=UDim2.fromOffset(348,238)
     if initial then
-        UI.window.Position=UDim2.fromOffset(math.floor((vp.X-width)/2),math.floor((vp.Y-height)/2))
-        UI.launcher.Position=UDim2.fromOffset(18,math.max(10,math.floor(vp.Y*.5-34)))
+        UI.window.Position=UDim2.fromOffset(
+            math.max(4,math.floor((vp.X-348*factor)/2)),
+            math.max(4,math.floor((vp.Y-238*factor)/2))
+        )
     end
-    UI.pad.Position=UDim2.new(1,-268,1,-math.min(213,vp.Y-8))
+    UI.pad.Position=UDim2.new(1,-198,1,-math.min(116,math.max(82,vp.Y*.18)))
 end
-local function setMinimized(yes)
+
+local function minimize(yes)
     minimized=yes
     UI.gui:SetAttribute("Minimized",yes)
     if yes then
         UI.launcher.Visible=true
-        tween(UI.windowFade,.25,{Value=0})
-        tween(UI.launcherFade,.26,{Value=1})
-        task.delay(.27,function()if state.alive and minimized then UI.window.Visible=false end end)
+        UI.window.Visible=false
+        UI.windowFade.Value=0
+        UI.launcherFade.Value=1
     else
         UI.window.Visible=true
-        tween(UI.windowFade,.27,{Value=1})
-        tween(UI.launcherFade,.23,{Value=0})
-        task.delay(.24,function()if state.alive and not minimized then UI.launcher.Visible=false end end)
+        UI.launcher.Visible=false
+        UI.windowFade.Value=1
+        UI.launcherFade.Value=0
     end
+    refreshAlpha()
 end
-connect(UI.Minimize.Activated,function()setMinimized(true)end)
-connect(UI.Collapse.Activated,function()collapsed=not collapsed;resize(false)end)
-connect(UI.Close.Activated,function()UI.gui:Destroy()end)
+connect(UI.minButton.Activated,function()minimize(true)end)
 connect(UI.launcher.Activated,function()
-    if state.suppressLauncherUntil and os.clock()<state.suppressLauncherUntil then return end
-    setMinimized(false)
+    if state.launcherMoved and os.clock() < state.launcherMoved then return end
+    minimize(false)
 end)
+connect(UI.closeButton.Activated,function()UI.gui:Destroy()end)
+
+-- Drag only the title surface, so buttons always receive taps.
 local function beginDrag(target,input)
-    local kind=input.UserInputType
-    if dragged or (kind~=Enum.UserInputType.MouseButton1 and kind~=Enum.UserInputType.Touch) then return end
-    dragged={target=target,input=input,start=input.Position,pos=target.Position,touch=kind==Enum.UserInputType.Touch,moved=false}
+    if dragging or (input.UserInputType~=Enum.UserInputType.Touch
+      and input.UserInputType~=Enum.UserInputType.MouseButton1) then return end
+    dragging={target=target,input=input,origin=input.Position,pos=target.Position,
+      touch=input.UserInputType==Enum.UserInputType.Touch,moved=false}
 end
-connect(UI.dragArea.InputBegan,function(input)beginDrag(UI.window,input)end)
-connect(UI.panelDrag.InputBegan,function(input)beginDrag(UI.window,input)end)
+connect(UI.dragBar.InputBegan,function(input)beginDrag(UI.window,input)end)
 connect(UI.launcher.InputBegan,function(input)beginDrag(UI.launcher,input)end)
 connect(Input.InputChanged,function(input)
-    if not dragged or (dragged.touch and input~=dragged.input) then return end
-    if not dragged.touch and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
-    local delta=input.Position-dragged.start
-    if not dragged.moved and delta.Magnitude<5 then return end
-    dragged.moved=true
-    local p=dragged.pos
-    dragged.target.Position=UDim2.new(p.X.Scale,p.X.Offset+delta.X,p.Y.Scale,p.Y.Offset+delta.Y)
+    if not dragging then return end
+    if dragging.touch and input~=dragging.input then return end
+    if not dragging.touch and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    local delta=input.Position-dragging.origin
+    if delta.Magnitude<5 and not dragging.moved then return end
+    dragging.moved=true
+    local p=dragging.pos
+    dragging.target.Position=UDim2.new(p.X.Scale,p.X.Offset+delta.X,p.Y.Scale,p.Y.Offset+delta.Y)
 end)
 connect(Input.InputEnded,function(input)
-    if not dragged or (dragged.touch and input~=dragged.input) then return end
-    if not dragged.touch and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
-    if dragged.target==UI.launcher and dragged.moved then state.suppressLauncherUntil=os.clock()+.5 end
-    dragged=nil
+    if not dragging then return end
+    if dragging.touch and input~=dragging.input then return end
+    if not dragging.touch and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+    if dragging.moved and dragging.target==UI.launcher then state.launcherMoved=os.clock()+.35 end
+    dragging=nil
 end)
-connect(Input.WindowFocusReleased,function()dragged=nil end)
-connect(Input.InputBegan,function(input,processed)
-    if not processed and input.KeyCode==Enum.KeyCode.RightShift then setMinimized(not minimized) end
-end)
-local function shutdown()
-    if not state.alive then return end
-    stop()
-    state.alive=false
-    for _,c in ipairs(connections)do c:Disconnect()end
-    for _,c in ipairs(extras)do c:Disconnect()end
-    for _,t in pairs(tweens)do t:Cancel()end
-    for thread in pairs(threads)do if coroutine.status(thread)~="dead" then pcall(task.cancel,thread)end end
-end
-addConnection(UI.gui.Destroying,shutdown)
+connect(Input.WindowFocusReleased,function()dragging=nil end)
 
--- Only original image assets are downloaded; no executable Lua is fetched.
-local base="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/"
-local specs={
+local function cleanup()
+    if not state.alive then return end
+    state.alive=false
+    features.fly.enabled=false
+    removePhysics()
+    for _,con in ipairs(connections)do pcall(function()con:Disconnect()end)end
+    for _,t in pairs(tweens)do pcall(function()t:Cancel()end)end
+end
+UI.gui.Destroying:Connect(cleanup)
+
+-- Original artwork is read-only; this file never edits Ghislain.
+local assetRoot="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/"
+local assets={
     {"background-cyber-v2.jpg","jpg",artworkImages.Background},
-    {"icon-home-v1.png","png",artworkImages.IconHome},
-    {"icon-visuals-v1.png","png",artworkImages.IconVisuals},
-    {"icon-settings-v1.png","png",artworkImages.IconSettings},
-    {"launcher-r-v1.png","png",{UI.logo}},
     {"flame-wisp-v1.png","png",VFX.images},
+    {"launcher-r-v1.png","png",{UI.launcherImage}}
 }
-for _,spec in ipairs(specs)do
+for _,spec in ipairs(assets)do
     spawn(function()
         local custom=getcustomasset or getsynasset
         if type(custom)~="function" or type(writefile)~="function" then return end
-        local file="ReyznVehicleFly_"..spec[1]
-        local uri
-        local okCached,isCached=pcall(function()return type(isfile)=="function" and isfile(file)end)
-        if okCached and isCached then
-            local worked,url=pcall(custom,file)
-            if worked then uri=url end
+        local filename="ReyznVehicleFly_"..spec[1]
+        local url
+        if type(isfile)=="function" and isfile(filename) then
+            local ok,result=pcall(custom,filename)
+            if ok and type(result)=="string" then url=result end
         end
-        if not uri then
-            local ok,data=pcall(function()return game:HttpGet(base..spec[1])end)
+        if not url then
+            local ok,data=pcall(function()return game:HttpGet(assetRoot..spec[1])end)
             if not state.alive then return end
             if ok and type(data)=="string" and #data>1000 then
                 local valid=(spec[2]=="jpg" and data:sub(1,3)=="\255\216\255")
                     or (spec[2]=="png" and data:sub(1,8)=="\137PNG\13\10\26\10")
-                if valid and pcall(writefile,file,data) then
-                    local worked,url=pcall(custom,file)
-                    if worked then uri=url end
+                if valid and pcall(writefile,filename,data) then
+                    local success,result=pcall(custom,filename)
+                    if success then url=result end
                 end
             end
         end
-        if state.alive and type(uri)=="string" then
-            for _,sprite in ipairs(spec[3])do sprite.Image=uri end
+        if state.alive and type(url)=="string" then
+            for _,target in ipairs(spec[3])do target.Image=url end
         end
     end)
 end
-UI.gui:SetAttribute("FlightSpeed",speed)
-choose("Home")
-resize(true)
 refreshAlpha()
-for _,v in ipairs({UI.windowFade,UI.launcherFade,UI.pageFade,UI.paneProgress})do
-    connect(v.Changed,refreshAlpha)
-end
-connect(UI.screen:GetPropertyChangedSignal("AbsoluteSize"),function()resize(false)end)
-local lastStatus=0
-local phase,budget=0,0
+adjustLayout(true)
+connect(UI.screen:GetPropertyChangedSignal("AbsoluteSize"),function()adjustLayout(false)end)
+connect(UI.windowFade.Changed,refreshAlpha)
+connect(UI.launcherFade.Changed,refreshAlpha)
+connect(UI.pageFade.Changed,refreshAlpha)
+
+local phase=0
+local elapsed=0
+local lastPaint=0
 connect(RunService.RenderStepped,function(dt)
-    budget+=dt
-    if budget<1/60 then return end
-    local delta=budget;budget=budget%(1/60)
-    phase+=delta
+    elapsed+=dt
+    if elapsed<1/60 then return end
+    dt=elapsed;elapsed=0
+    phase+=dt
     state.phase=phase
-    state.burst=math.max(0,(state.burst or 0)-delta*2.6)
-    VFX.reflections:update(delta)
-    if UI.launcher.Visible then UI.launcherAura:update(phase,state.burst)end
+    state.burst=math.max(0,state.burst-dt*2.4)
+    VFX.reflections:update(dt)
     if UI.window.Visible then
-        UI.dockAura:update(phase,state.burst)
-        if not collapsed then UI.panelAura:update(phase+.63,state.burst)end
-        for i,fx in ipairs({UI.dockFx,UI.panelFx})do
-            if i==1 or not collapsed then
-                fx.inward:update(phase,state.burst)
-                fx.neon:update(phase,.10+.02*math.sin(phase*.6)^2)
-                fx.beamGradient.Offset=Vector2.new(math.sin(phase*.2+i)*.3,0)
-            end
-        end
-        for _,record in ipairs(buttons)do
-            record.neon:update(phase,.085+record.selection.Value*.11+record.energy.Value*.04)
-            record.selectedGradient.Offset=record.neon.wash.Offset
-        end
-        if currentTab=="Home" and not collapsed then UI.heroNeon:update(phase,.08)end
-        if currentTab=="Flight" and not collapsed then UI.flightToggle:update(phase)end
-        if currentTab=="Settings" and not collapsed then
-            UI.cameraToggle:update(phase);UI.levelToggle:update(phase)
-        end
+        UI.fire:update(phase,state.burst)
+        UI.panelFx.inward:update(phase,state.burst)
+        UI.panelFx.neon:update(phase,.12)
+        UI.panelFx.beamGradient.Offset=Vector2.new(math.sin(phase*.24)*.35,0)
+        UI.flightToggle:update(phase)
     end
-    UI.logoFallback.Visible=UI.logo.Image=="" or not UI.logo.IsLoaded
-    for _,sprite in ipairs(iconSprites)do
-        local loaded=sprite.image.Image~="" and sprite.image.IsLoaded
-        for _,line in ipairs(sprite.fallback)do line.Visible=not loaded end
+    if UI.launcher.Visible then UI.launcherFire:update(phase,state.burst) end
+    if UI.pad.Visible then padFx:update(phase,.13) end
+    for _,record in ipairs(buttons)do
+        record.neon:update(phase,.09+record.selection.Value*.13+record.energy.Value*.04)
+        record.selectedGradient.Offset=record.neon.wash.Offset
     end
-    if phase-lastStatus>.4 then
-        lastStatus=phase
-        local seat=getSeat()
-        if not features.fly.enabled then
-            UI.heroStatus.Text=seat and "VEHICLE FLY\nStatus: Ready to fly" or "VEHICLE FLY\nStatus: Waiting for vehicle"
-            if seat and UI.status.Text=="SIT IN A VEHICLE FIRST" then UI.status.Text="READY | TAP VEHICLE FLY" end
-        else
-            UI.heroStatus.Text="VEHICLE FLY\nStatus: Flying at "..speed.." studs/s"
-        end
+    UI.launcherLetter.Visible=UI.launcherImage.Image=="" or not UI.launcherImage.IsLoaded
+    if phase-lastPaint>=.2 then
+        lastPaint=phase
+        local message
+        if not features.fly.enabled then message="OFF"
+        elseif armed.root then message="FLYING"
+        else message="ARMED  •  WAITING FOR VEHICLE" end
+        if message~=lastStatus then UI.status.Text=message;lastStatus=message end
     end
 end)
 return UI.gui
