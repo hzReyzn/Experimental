@@ -973,11 +973,6 @@ local padFx=NeonFlow.new(UI.pad,"PadNeon",12,5.3,nil)
 UI.padDrag=frame(UI.pad,"DragHandle",UDim2.fromOffset(7,2),UDim2.new(1,-14,0,24),nil,1,"fixed")
 UI.padDrag.Active=true
 UI.padDrag.ZIndex=24
-local dragHint=label(UI.padDrag,"DragHint","⋮⋮  DRAG  ⋮⋮",
-    UDim2.fromScale(0,0),UDim2.fromScale(1,1),12,C.silver,OPTION_FONT)
-dragHint.TextXAlignment=Enum.TextXAlignment.Center
-dragHint.Active=false
-dragHint.ZIndex=25
 UI.upButton,UI.upEffect=compactButton(UI.pad,"Up","UP",8,34,81,54)
 UI.downButton,UI.downEffect=compactButton(UI.pad,"Down","DOWN",97,34,81,54)
 UI.upButton.ZIndex=23
