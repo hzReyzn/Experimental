@@ -1,0 +1,177 @@
+
+-- Reyzn X | Anti-Void V1
+-- Natural Disaster Survival
+-- Standalone test script
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+if game.PlaceId ~= 189707 then
+    warn("[Anti-Void] Solo funciona en Natural Disaster Survival")
+    return
+end
+
+-- Coordenadas tomadas de Reyzn X
+local SAFE_LOCATIONS = {
+    {
+        Name = "Island",
+        Position = Vector3.new(
+            -127.3518295288086,
+            47.61382293701172,
+            8.868382453918457
+        )
+    },
+    {
+        Name = "Tower",
+        Position = Vector3.new(
+            -236.30526733398438,
+            194.6138153076172,
+            337.5936584472656
+        )
+    }
+}
+
+local CONFIG = {
+    DetectionHeight = 18,
+    MinimumFallSpeed = -12,
+    RayDistance = 400,
+    CheckInterval = 0.10,
+    RescueCooldown = 2,
+    SpawnProtection = 2
+}
+
+-- Evitar monitores duplicados
+local environment =
+    type(getgenv) == "function"
+    and getgenv()
+    or _G
+
+if environment.ReyznAntiVoidConnection then
+    environment.ReyznAntiVoidConnection:Disconnect()
+end
+
+local lastRescue = -math.huge
+local lastCheck = 0
+local currentCharacter = nil
+local spawnTime = 0
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+rayParams.RespectCanCollide = true
+
+-- Buscar el destino más cercano en X/Z
+local function findNearestSafeLocation(position)
+    local nearest = nil
+    local shortestDistance = math.huge
+
+    for _, location in ipairs(SAFE_LOCATIONS) do
+        local delta = location.Position - position
+
+        local distance =
+            delta.X * delta.X +
+            delta.Z * delta.Z
+
+        if distance < shortestDistance then
+            shortestDistance = distance
+            nearest = location
+        end
+    end
+
+    return nearest
+end
+
+-- Comprobar si hay suelo sólido debajo
+local function hasGroundBelow(character, root)
+    rayParams.FilterDescendantsInstances = {character}
+
+    local result = workspace:Raycast(
+        root.Position,
+        Vector3.new(0, -CONFIG.RayDistance, 0),
+        rayParams
+    )
+
+    return result ~= nil
+end
+
+local function rescueCharacter(character, humanoid, root)
+    local destination = findNearestSafeLocation(root.Position)
+    if not destination then return end
+
+    lastRescue = os.clock()
+
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+
+    root.CFrame =
+        CFrame.new(destination.Position) *
+        root.CFrame.Rotation
+
+    humanoid:ChangeState(
+        Enum.HumanoidStateType.GettingUp
+    )
+
+    print(
+        "[Anti-Void] Rescatado. Destino:",
+        destination.Name
+    )
+end
+
+local function checkVoid()
+    local now = os.clock()
+
+    if now - lastCheck < CONFIG.CheckInterval then
+        return
+    end
+
+    lastCheck = now
+
+    local character = player.Character
+
+    if character ~= currentCharacter then
+        currentCharacter = character
+        spawnTime = now
+    end
+
+    if not character then return end
+    if now - spawnTime < CONFIG.SpawnProtection then return end
+    if now - lastRescue < CONFIG.RescueCooldown then return end
+
+    local humanoid =
+        character:FindFirstChildOfClass("Humanoid")
+
+    local root =
+        character:FindFirstChild("HumanoidRootPart")
+
+    if not humanoid or not root then return end
+    if humanoid.Health <= 0 then return end
+    if root.Anchored then return end
+    if humanoid.SeatPart then return end
+
+    local height = root.Position.Y
+    local fallSpeed = root.AssemblyLinearVelocity.Y
+
+    -- Considerar también el límite de destrucción
+    local dangerHeight = math.max(
+        CONFIG.DetectionHeight,
+        workspace.FallenPartsDestroyHeight + 35
+    )
+
+    -- No activar mientras siga en zona segura
+    if height > dangerHeight then return end
+
+    -- Tiene que estar cayendo
+    if fallSpeed > CONFIG.MinimumFallSpeed then return end
+
+    -- Si hay suelo debajo, no es vacío
+    if hasGroundBelow(character, root) then return end
+
+    rescueCharacter(character, humanoid, root)
+end
+
+environment.ReyznAntiVoidConnection =
+    RunService.Heartbeat:Connect(checkVoid)
+
+print("[Reyzn X] Anti-Void V1 iniciado")
