@@ -1,0 +1,41 @@
+
+local map = workspace:WaitForChild("Structure"):FindFirstChild("Launch Land")
+
+if not map then
+    warn("Launch Land no está disponible")
+    return
+end
+
+if type(fireclickdetector) ~= "function" then
+    warn("fireclickdetector no está disponible")
+    return
+end
+
+local sequence = {
+    "ReleaseEntryBridge",
+    "ReleaseButtonUpper",
+    "ReleaseButtonLower",
+    "IgnitionButton"
+}
+
+for _, name in ipairs(sequence) do
+    local button = map:FindFirstChild(name, true)
+    local detector = button and button:FindFirstChildOfClass("ClickDetector")
+
+    if not detector then
+        warn("No se encontró:", name)
+        return
+    end
+
+    local ok, err = pcall(fireclickdetector, detector)
+
+    if not ok then
+        warn("Error:", name, err)
+        return
+    end
+
+    print("Activación intentada:", name)
+    task.wait(0.3)
+end
+
+print("Secuencia terminada 🚀")
