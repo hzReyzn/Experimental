@@ -167,152 +167,142 @@ local function button(parent, value, pos, size, color)
     return item
 end
 
+-- Read-only diagnostics: never alter mouse properties, shots or tools.
+-- Some DUELS modes do not replicate the Game/Team attributes. The preview
+-- can still inspect visible player characters when those are absent.
 local function getDuelId(player)
     local id = player:GetAttribute("Game")
     if id == nil or tostring(id) == "" then return nil end
     return id
 end
 
-local function equippedDuelWeapon()
-    local char = LocalPlayer.Character
-    local tool = char and char:FindFirstChildOfClass("Tool")
-    if not tool then return false end
-    -- These two objects occur in public DUELS implementations.
-    return tool:FindFirstChild("fire") ~= nil
-        and tool:FindFirstChild("showBeam") ~= nil
+local function getTeam(player)
+    local team = player:GetAttribute("Team")
+    if team ~= nil and tostring(team) ~= "" then return tostring(team) end
+    if player.Team then return player.Team.Name end
+    return nil
+end
+
+local function isEligibleForPreview(other)
+    local gameA, gameB = getDuelId(LocalPlayer), getDuelId(other)
+    if gameA and gameB and gameA ~= gameB then return false end
+
+    local teamA, teamB = getTeam(LocalPlayer), getTeam(other)
+    if teamA and teamB and teamA == teamB then return false end
+
+    return true
+end
+
+local function getPreviewPart(model)
+    return model and (
+        model:FindFirstChild(State.targetPart)
+        or model:FindFirstChild("Head")
+        or model:FindFirstChild("UpperTorso")
+        or model:FindFirstChild("Torso")
+        or model:FindFirstChild("HumanoidRootPart")
+    )
 end
 
 local function isVisible(part)
     if not State.wallCheck then return true end
     local camera = Workspace.CurrentCamera
     if not camera then return false end
+
     local origin = camera.CFrame.Position
     local difference = part.Position - origin
     if difference.Magnitude < 0.01 then return true end
 
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {
-        LocalPlayer.Character
-    }
+    if LocalPlayer.Character then
+        params.FilterDescendantsInstances = {LocalPlayer.Character}
+    end
     params.IgnoreWater = true
 
     local hit = Workspace:Raycast(origin, difference, params)
-    return hit == nil or hit.Instance:IsDescendantOf(part.Parent)
-end
-
-function State:GetTarget(requireWeapon)
-    if not self.alive or not self.enabled then return nil end
-    if requireWeapon and not equippedDuelWeapon() then return nil end
-
-    local camera = Workspace.CurrentCamera
-    if not camera then return nil end
-    local myGame = getDuelId(LocalPlayer)
-    local myTeam = LocalPlayer:GetAttribute("Team")
-    if not myGame or myTeam == nil then return nil end
-
-    local myChar = LocalPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return nil end
-
-    local center = Vector2.new(
-        camera.ViewportSize.X * 0.5,
-        camera.ViewportSize.Y * 0.5
+    return hit == nil or (
+        part.Parent ~= nil
+        and hit.Instance:IsDescendantOf(part.Parent)
     )
-    local nearest, nearestPixels = nil, self.fov
-
-    for _, other in ipairs(Players:GetPlayers()) do
-        if other ~= LocalPlayer
-            and getDuelId(other) == myGame
-            and other:GetAttribute("Team") ~= nil
-            and other:GetAttribute("Team") ~= myTeam then
-
-            local char = other.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            local part = char and (
-                char:FindFirstChild(self.targetPart)
-                or char:FindFirstChild("UpperTorso")
-                or char:FindFirstChild("HumanoidRootPart")
-            )
-
-            if hum and hum.Health > 0 and part then
-                local worldDistance = (part.Position - myRoot.Position).Magnitude
-                if worldDistance <= self.maxDistance then
-                    local point, onScreen = camera:WorldToViewportPoint(part.Position)
-                    if onScreen and point.Z > 0 then
-                        local pixels = (
-                            Vector2.new(point.X, point.Y) - center
-                        ).Magnitude
-
-                        if pixels < nearestPixels and isVisible(part) then
-                            nearest = part
-                            nearestPixels = pixels
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return nearest
 end
 
--- This version deliberately does not install a hook or alter shots.
--- It observes only replicated player/team data and camera projections.
-
-local function inspectSession()
+local function previewScan()
     local info = {
-        game = LocalPlayer:GetAttribute("Game"),
-        team = LocalPlayer:GetAttribute("Team"),
+        game = getDuelId(LocalPlayer),
+        team = getTeam(LocalPlayer),
+        onlinePlayers = math.max(0, #Players:GetPlayers() - 1),
+        aliveCharacters = 0,
         candidates = 0,
         onscreen = 0,
         withinFov = 0,
         visible = 0,
+        filtered = 0,
         tool = "-",
-        weaponEvents = false
+        selectedPart = nil,
+        selectedName = nil
     }
-    local char = LocalPlayer.Character
-    local tool = char and char:FindFirstChildOfClass("Tool")
-    if tool then
-        info.tool = tool.Name
-        info.weaponEvents =
-            tool:FindFirstChild("fire") ~= nil
-            and tool:FindFirstChild("showBeam") ~= nil
-    end
+
+    local myChar = LocalPlayer.Character
+    local tool = myChar and myChar:FindFirstChildOfClass("Tool")
+    if tool then info.tool = tool.Name end
+
     local camera = Workspace.CurrentCamera
-    if not camera or not info.game or info.team == nil then return info end
+    if not camera then return info end
+
     local center = Vector2.new(
-        camera.ViewportSize.X * .5, camera.ViewportSize.Y * .5
+        camera.ViewportSize.X * .5,
+        camera.ViewportSize.Y * .5
     )
+    local nearestPixels = State.fov
+
     for _, other in ipairs(Players:GetPlayers()) do
-        if other ~= LocalPlayer
-            and other:GetAttribute("Game") == info.game
-            and other:GetAttribute("Team") ~= nil
-            and other:GetAttribute("Team") ~= info.team then
+        if other ~= LocalPlayer then
             local model = other.Character
             local hum = model and model:FindFirstChildOfClass("Humanoid")
-            local part = model and (
-                model:FindFirstChild(State.targetPart)
-                or model:FindFirstChild("UpperTorso")
-                or model:FindFirstChild("HumanoidRootPart")
-            )
+            local part = getPreviewPart(model)
+
             if hum and hum.Health > 0 and part then
-                info.candidates += 1
-                local point, onScreen =
-                    camera:WorldToViewportPoint(part.Position)
-                if onScreen and point.Z > 0 then
-                    info.onscreen += 1
-                    if (Vector2.new(point.X,point.Y) - center).Magnitude
-                        <= State.fov then
-                        info.withinFov += 1
-                        if isVisible(part) then
-                            info.visible += 1
+                info.aliveCharacters += 1
+                if isEligibleForPreview(other) then
+                    info.candidates += 1
+                    local point, onScreen =
+                        camera:WorldToViewportPoint(part.Position)
+                    if onScreen and point.Z > 0 then
+                        info.onscreen += 1
+                        local pixels = (
+                            Vector2.new(point.X, point.Y) - center
+                        ).Magnitude
+                        if pixels <= State.fov then
+                            info.withinFov += 1
+                            if isVisible(part) then
+                                info.visible += 1
+                                if pixels < nearestPixels then
+                                    nearestPixels = pixels
+                                    info.selectedPart = part
+                                    info.selectedName = other.DisplayName
+                                end
+                            end
                         end
                     end
+                else
+                    info.filtered += 1
                 end
             end
         end
     end
+
     return info
+end
+
+-- Only a preview of player characters. Does not claim enemy identity when
+-- the game's team or duel data is not available.
+function State:GetTarget()
+    if not self.alive or not self.enabled then return nil end
+    return previewScan().selectedPart
+end
+
+local function inspectSession()
+    return previewScan()
 end
 
 -- Standalone GUI, not parented to or dependent on Reyzn X.
@@ -393,7 +383,7 @@ local accentGradient = gradient(accent, {
 text(header, "REYZN  X", UDim2.fromOffset(17, 11),
     UDim2.fromOffset(218, 28), 23, Colors.silver,
     Enum.TextXAlignment.Left, true).ZIndex = 3
-text(header, "TARGET DIAGNOSTICS  /  V2",
+text(header, "TARGET DIAGNOSTICS  /  V3",
     UDim2.fromOffset(18, 39), UDim2.fromOffset(265, 14),
     11, Colors.cyan).ZIndex = 3
 
@@ -419,7 +409,7 @@ local function card(y, height)
 end
 
 local toggleCard = card(81, 62)
-text(toggleCard, "TARGET SCAN", UDim2.fromOffset(13, 8),
+text(toggleCard, "PLAYER SCAN", UDim2.fromOffset(13, 8),
     UDim2.fromOffset(175, 22), 17, Colors.silver,
     Enum.TextXAlignment.Left, true).ZIndex = 3
 text(toggleCard, "Read-only • shots unchanged", UDim2.fromOffset(13, 33),
@@ -491,7 +481,7 @@ local diagRound = text(diagCard, "GAME: -   |   TEAM: -",
 local diagWeapon = text(diagCard, "TOOL: -",
     UDim2.fromOffset(12, 20), UDim2.new(1, -24, 0, 16),
     11, Colors.muted)
-local diagCounts = text(diagCard, "ENEMIES: 0  |  FOV: 0  |  LOS: 0",
+local diagCounts = text(diagCard, "SCAN: 0  |  FOV: 0  |  LOS: 0",
     UDim2.fromOffset(12, 36), UDim2.new(1, -24, 0, 15),
     11, Colors.cyan)
 diagRound.ZIndex, diagWeapon.ZIndex, diagCounts.ZIndex = 3, 3, 3
@@ -718,39 +708,52 @@ connect(RunService.Heartbeat, function(dt)
     accentGradient.Offset = Vector2.new(math.sin(os.clock() * .8) * .22, 0)
 
     local info = inspectSession()
-    diagRound.Text = "GAME: " .. tostring(info.game or "-")
-        .. "  |  TEAM: " .. tostring(info.team or "-")
+    diagRound.Text = "GAME: " .. tostring(info.game or "UNKNOWN")
+        .. "  |  TEAM: " .. tostring(info.team or "UNKNOWN")
     diagWeapon.Text = "TOOL: " .. tostring(info.tool)
-        .. (info.weaponEvents and " [DUELS EVENTS]" or "")
+        .. "  |  PLAYERS: " .. tostring(info.onlinePlayers)
     diagCounts.Text = string.format(
-        "ENEMIES: %d  |  FOV: %d  |  LOS: %d",
+        "SCAN: %d  |  FOV: %d  |  LOS: %d",
         info.candidates, info.withinFov, info.visible
     )
 
     targetMarker.Visible = false
     if not State.enabled then return end
-    if info.game == nil or info.team == nil then
-        statusText.Text = "WAITING FOR DUEL ATTRIBUTES"
-        statusText.TextColor3 = Colors.muted
-        return
-    end
 
-    local target = State:GetTarget(false)
-    if target and target.Parent then
-        statusText.Text = "VISIBLE TARGET: " .. target.Parent.Name
+    local camera = Workspace.CurrentCamera
+    if info.selectedPart and info.selectedPart.Parent and camera then
+        statusText.Text = "VISIBLE PLAYER: "
+            .. tostring(info.selectedName or info.selectedPart.Parent.Name)
         statusText.TextColor3 = Colors.green
         local point, onScreen =
-            Workspace.CurrentCamera:WorldToViewportPoint(target.Position)
+            camera:WorldToViewportPoint(info.selectedPart.Position)
         if onScreen and point.Z > 0 then
-            targetMarker.Position =
-                UDim2.fromOffset(point.X,point.Y)
+            targetMarker.Position = UDim2.fromOffset(point.X, point.Y)
             targetMarker.Visible = true
         end
+    elseif info.onlinePlayers == 0 then
+        statusText.Text = "NO OTHER PLAYERS IN SERVER"
+        statusText.TextColor3 = Colors.muted
+    elseif info.aliveCharacters == 0 then
+        statusText.Text = "NO LOADED / ALIVE CHARACTERS"
+        statusText.TextColor3 = Colors.muted
+    elseif info.candidates == 0 then
+        statusText.Text = "ALL PLAYERS FILTERED BY GAME / TEAM"
+        statusText.TextColor3 = Colors.muted
+    elseif info.onscreen == 0 then
+        statusText.Text = "NO CANDIDATES ON SCREEN"
+        statusText.TextColor3 = Colors.muted
+    elseif info.withinFov == 0 then
+        statusText.Text = "CENTER VIEW OR INCREASE FOV"
+        statusText.TextColor3 = Colors.muted
+    elseif info.visible == 0 then
+        statusText.Text = "BLOCKED BY WALL CHECK / OBSTACLES"
+        statusText.TextColor3 = Colors.muted
     else
-        statusText.Text = "NO VISIBLE TARGET INSIDE FOV"
+        statusText.Text = "NO PREVIEW TARGET"
         statusText.TextColor3 = Colors.muted
     end
 end)
 
-print("[Reyzn X] Target Diagnostics v2 loaded")
-print("[Reyzn X] READ ONLY: no shot hooks, mouse changes or remote calls")
+print("[Reyzn X] Player Diagnostics v3 loaded")
+print("[Reyzn X] READ ONLY: preview only; no shot hooks or remote calls")
