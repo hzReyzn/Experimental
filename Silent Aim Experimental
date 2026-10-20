@@ -1,5 +1,5 @@
 --[[
-    REYZN X | TARGET DIAGNOSTICS EXPERIMENTAL V2
+    REYZN X | TARGET DIAGNOSTICS EXPERIMENTAL V4
     Standalone / Murderers VS Sheriffs: DUELS
     Mobile-first | Amethyst / Cyan GUI | Made By Reyzn
 
@@ -75,7 +75,6 @@ local State = {
     connections = {},
     gui = nil,
     target = nil,
-    previewTimer = 0,
     minimized = false
 }
 
@@ -383,7 +382,7 @@ local accentGradient = gradient(accent, {
 text(header, "REYZN  X", UDim2.fromOffset(17, 11),
     UDim2.fromOffset(218, 28), 23, Colors.silver,
     Enum.TextXAlignment.Left, true).ZIndex = 3
-text(header, "TARGET DIAGNOSTICS  /  V3",
+text(header, "TARGET DIAGNOSTICS  /  V4",
     UDim2.fromOffset(18, 39), UDim2.fromOffset(265, 14),
     11, Colors.cyan).ZIndex = 3
 
@@ -680,6 +679,7 @@ function State:Destroy()
         connection:Disconnect()
     end
     table.clear(self.connections)
+    self.target = nil
     if self.gui then self.gui:Destroy() end
     if ENV[SESSION_KEY] == self then ENV[SESSION_KEY] = nil end
 end
@@ -687,6 +687,40 @@ connect(close.MouseButton1Click, function()
     State:Destroy()
 end)
 
+-- Marker movement uses the camera's render clock, not the slower
+-- diagnostics interval. This improves perceived tracking without
+-- increasing the expense of the Raycast/player scans.
+connect(RunService.RenderStepped, function()
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        targetMarker.Visible = false
+        return
+    end
+
+    updateRing()
+    local part = State.enabled and State.target or nil
+    if not part or not part.Parent then
+        targetMarker.Visible = false
+        return
+    end
+
+    local hum = part.Parent:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        targetMarker.Visible = false
+        return
+    end
+
+    local point, onScreen = camera:WorldToViewportPoint(part.Position)
+    if not onScreen or point.Z <= 0 then
+        targetMarker.Visible = false
+        return
+    end
+
+    targetMarker.Position = UDim2.fromOffset(point.X, point.Y)
+    targetMarker.Visible = true
+end)
+
+-- Diagnostic counts and target selection remain throttled for mobile.
 local updateTime = 0
 connect(RunService.Heartbeat, function(dt)
     updateTime += dt
@@ -702,7 +736,6 @@ connect(RunService.Heartbeat, function(dt)
         )
     end
 
-    updateRing()
     mainGradient.Offset = Vector2.new(math.sin(os.clock() * .5) * .28, 0)
     logoGradient.Offset = Vector2.new(math.sin(os.clock() * .7) * .35, 0)
     accentGradient.Offset = Vector2.new(math.sin(os.clock() * .8) * .22, 0)
@@ -717,20 +750,13 @@ connect(RunService.Heartbeat, function(dt)
         info.candidates, info.withinFov, info.visible
     )
 
-    targetMarker.Visible = false
+    State.target = State.enabled and info.selectedPart or nil
     if not State.enabled then return end
 
-    local camera = Workspace.CurrentCamera
-    if info.selectedPart and info.selectedPart.Parent and camera then
+    if info.selectedPart and info.selectedPart.Parent then
         statusText.Text = "VISIBLE PLAYER: "
             .. tostring(info.selectedName or info.selectedPart.Parent.Name)
         statusText.TextColor3 = Colors.green
-        local point, onScreen =
-            camera:WorldToViewportPoint(info.selectedPart.Position)
-        if onScreen and point.Z > 0 then
-            targetMarker.Position = UDim2.fromOffset(point.X, point.Y)
-            targetMarker.Visible = true
-        end
     elseif info.onlinePlayers == 0 then
         statusText.Text = "NO OTHER PLAYERS IN SERVER"
         statusText.TextColor3 = Colors.muted
@@ -755,5 +781,5 @@ connect(RunService.Heartbeat, function(dt)
     end
 end)
 
-print("[Reyzn X] Player Diagnostics v3 loaded")
+print("[Reyzn X] Player Diagnostics v4 loaded (render-synced marker)")
 print("[Reyzn X] READ ONLY: preview only; no shot hooks or remote calls")
