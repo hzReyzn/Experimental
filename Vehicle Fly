@@ -1,1 +1,1185 @@
+-- REYZN VEHICLE FLY 1.0 | AMETHYST EDITION
+-- Standalone vehicle flight interface, based on authentic Reyzn X styling.
+-- Changes only hzReyzn/Experimental/Vehicle Fly, never Ghislain.
+-- PC: WASD movement, E ascend, Q descend. Mobile: on-screen hold controls.
+local Players = game:GetService("Players")
+local Input = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local ContentProvider = game:GetService("ContentProvider")
+local player = Players.LocalPlayer
+if not player then return end
+local startedAt = os.clock()
+local playerGui = player:WaitForChild("PlayerGui")
+local old=playerGui:FindFirstChild("ReyznVehicleFly")
+if old then old:Destroy() end
+-- Public version changes ONLY at the owner's explicit request.
+local VERSION = "1.0"
+local BUILD = "teleports-fps-servers-20261018"
+-- Roblox Creator Store: Rajdhani, published by Roblox. Use FontFace, not
+-- an invented Enum.Font entry. The brand and credit retain their own fonts.
+local OPTION_FONT = Font.new("rbxassetid://12187375422",Enum.FontWeight.SemiBold,Enum.FontStyle.Normal)
+local ICON_TRANSPARENCY, BACKGROUND_TRANSPARENCY = .85, .83
+local VFX_RATE = 60 -- Ultra High is fixed; no automatic quality reduction.
+local C = {
+    base=Color3.fromRGB(10,10,15), panel=Color3.fromRGB(16,15,23),
+    black=Color3.fromRGB(8,8,12), steel=Color3.fromRGB(71,68,85),
+    silver=Color3.fromRGB(217,219,233), white=Color3.fromRGB(245,244,251),
+    muted=Color3.fromRGB(184,181,201), line=Color3.fromRGB(66,59,85),
+    violet=Color3.fromRGB(157,103,239), light=Color3.fromRGB(213,181,255),
+    deep=Color3.fromRGB(60,31,99), green=Color3.fromRGB(132,225,179), ice=Color3.fromRGB(180,207,255),
+    rose=Color3.fromRGB(212,152,219), chrome=Color3.fromRGB(235,237,247),
+    pink=Color3.fromRGB(245,92,202), orchid=Color3.fromRGB(192,114,255),
+    cyan=Color3.fromRGB(141,220,255),
+}
+local state = {alive=true, target="open", page="Home", paneOpen=true,
+    lastSecond=-1, phase=0, budget=0, burst=0, finishAt=0, launcherMoved=false}
+local UI, connections, threads, tweens = {}, {}, {}, {}
+local features = {}
+local scopes, alphaEntries, alphaLookup = {}, {}, {}
+local factors = {window=0, pane=0, page=0, launcher=0, notification=0, disaster=0, fps=0, fixed=1}
 
+local function connect(signal, callback)
+    local c = signal:Connect(function(...) if state.alive then callback(...) end end)
+    connections[#connections+1] = c
+    return c
+end
+local function spawn(callback)
+    local thread
+    thread = task.defer(function() callback(); threads[thread]=nil end)
+    threads[thread] = true
+end
+-- Transparency is composed from immutable base values. Transitions never sample
+-- a half-faded frame, so repeated/reversed animations cannot progressively dim it.
+local function registerAlpha(o, property, base, scope)
+    local entry={object=o, property=property, base=base, scope=scope}
+    alphaEntries[#alphaEntries+1]=entry
+    alphaLookup[o]=alphaLookup[o] or {}; alphaLookup[o][property]=entry
+    o[property]=1-(1-base)*(factors[scope] or 1)
+end
+local function alpha(o, property, base)
+    local entry=alphaLookup[o] and alphaLookup[o][property]
+    if entry then
+        entry.base=base; o[property]=1-(1-base)*(factors[entry.scope] or 1)
+    else o[property]=base end
+end
+local function refreshAlpha()
+    factors.window=UI.windowFade.Value
+    factors.pane=factors.window*UI.paneProgress.Value
+    factors.page=factors.pane*UI.pageFade.Value
+    factors.launcher=UI.launcherFade.Value
+    factors.notification=UI.toastProgress and UI.toastProgress.Value or 0
+    factors.disaster=UI.disasterProgress and UI.disasterProgress.Value or 0
+    factors.fps=UI.fpsProgress and UI.fpsProgress.Value or 0
+    for _,entry in ipairs(alphaEntries) do
+        entry.object[entry.property]=1-(1-entry.base)*(factors[entry.scope] or 1)
+    end
+end
+local function make(class, parent, props, scope)
+    local o=Instance.new(class)
+    for k,v in pairs(props or {}) do o[k]=v end
+    if o:IsA("GuiObject") then o.BorderSizePixel=0; o.AutoLocalize=false end
+    scopes[o]=scope or scopes[parent] or "fixed"
+    o.Parent=parent
+    if o:IsA("GuiObject") then
+        registerAlpha(o,"BackgroundTransparency",o.BackgroundTransparency,scopes[o])
+        if o:IsA("TextLabel") or o:IsA("TextButton") then
+            o.TextStrokeTransparency=1
+            registerAlpha(o,"TextTransparency",o.TextTransparency,scopes[o])
+        end
+        if o:IsA("ImageLabel") or o:IsA("ImageButton") then
+            registerAlpha(o,"ImageTransparency",o.ImageTransparency,scopes[o])
+        end
+        if o:IsA("ScrollingFrame") then registerAlpha(o,"ScrollBarImageTransparency",o.ScrollBarImageTransparency,scopes[o]) end
+    elseif o:IsA("UIStroke") then registerAlpha(o,"Transparency",o.Transparency,scopes[o]) end
+    return o
+end
+local function tween(o, seconds, props)
+    if not state.alive then return end
+    if tweens[o] then tweens[o]:Cancel() end
+    local t=TweenService:Create(o,TweenInfo.new(seconds,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),props)
+    tweens[o]=t; t:Play()
+end
+local function corner(o,r) return make("UICorner",o,{CornerRadius=UDim.new(0,r or 12)}) end
+local function stroke(o,color,opacity,width)
+    return make("UIStroke",o,{Color=color or C.line,Transparency=opacity or 0,Thickness=width or 1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
+end
+local function gradient(o,colors,rotation)
+    local keys={}
+    for i,color in ipairs(colors) do keys[i]=ColorSequenceKeypoint.new((i-1)/(#colors-1),color) end
+    return make("UIGradient",o,{Color=ColorSequence.new(keys),Rotation=rotation or 90})
+end
+local function fadeGradient(g)
+    g.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(.48,.08),NumberSequenceKeypoint.new(.52,.08),NumberSequenceKeypoint.new(1,1)})
+end
+local function frame(parent,name,pos,size,color,transparency,scope)
+    return make("Frame",parent,{Name=name,Position=pos,Size=size,BackgroundColor3=color or C.panel,BackgroundTransparency=transparency or 0},scope)
+end
+local function label(parent,name,text,pos,size,pixels,color,font)
+    local o=make("TextLabel",parent,{Name=name,Text=text,Position=pos,Size=size,BackgroundTransparency=1,
+        TextColor3=color or C.white,TextSize=pixels or 14,Font=font~=OPTION_FONT and font or Enum.Font.GothamMedium,
+        TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Center,TextTruncate=Enum.TextTruncate.AtEnd})
+    if font==OPTION_FONT then o.FontFace=OPTION_FONT end
+    return o
+end
+local function imageLabel(parent,name,pos,size)
+    return make("ImageLabel",parent,{Name=name,Image="",Position=pos,Size=size,BackgroundTransparency=1,ScaleType=Enum.ScaleType.Fit})
+end
+local paths={
+    crown={{{3,7},{6,17},{18,17},{21,7},{16,11},{12,3},{8,11},{3,7}},{{6,21},{18,21}}},
+    home={{{3,11},{12,3},{21,11}},{{6,9},{6,21},{10,21},{10,15},{14,15},{14,21},{18,21},{18,9}}},
+    cube={{{12,2},{22,7},{22,18},{12,23},{2,18},{2,7},{12,2}},{{2,7},{12,12},{22,7}},{{12,12},{12,23}}},
+    spark={{{12,2},{15,9},{22,12},{15,15},{12,22},{9,15},{2,12},{9,9},{12,2}}},
+    code={{{8,6},{2,12},{8,18}},{{16,6},{22,12},{16,18}},{{14,3},{10,21}}},
+    settings={{{4,6},{20,6}},{{4,12},{20,12}},{{4,18},{20,18}},{{9,3},{9,9}},{{16,9},{16,15}},{{8,15},{8,21}}},
+    arrow={{{4,12},{20,12}},{{14,6},{20,12},{14,18}}},
+    close={{{6,6},{18,18}},{{18,6},{6,18}}},
+    minimize={{{5,16},{19,16}}}, fold={{{14,5},{7,12},{14,19}}},
+}
+local artworkImages={IconHome={},IconMain={},IconVisuals={},IconScripts={},IconSettings={},Background={},Emblem={}}
+local iconSprites={}
+local iconAssets={home="IconHome",cube="IconMain",spark="IconVisuals",code="IconScripts",settings="IconSettings"}
+local function icon(parent,kind,pos,size,color)
+    local host=frame(parent,"Icon_"..kind,pos,UDim2.fromOffset(size,size),nil,1)
+    local fallback={}
+    for _,path in ipairs(paths[kind]) do
+        for i=1,#path-1 do
+            local a,b=path[i],path[i+1]; local dx,dy=(b[1]-a[1])*size/24,(b[2]-a[2])*size/24
+            local line=frame(host,"Line",UDim2.fromOffset((a[1]+b[1])*size/48,(a[2]+b[2])*size/48),UDim2.fromOffset(math.sqrt(dx*dx+dy*dy),1.7),color or C.silver)
+            line.AnchorPoint=Vector2.new(.5,.5); line.Rotation=math.deg(math.atan2(dy,dx)); corner(line,2)
+            fallback[#fallback+1]=line
+        end
+    end
+    local asset=iconAssets[kind]
+    if asset then
+        local artwork=imageLabel(host,"OptionArtwork",UDim2.fromScale(.5,.5),UDim2.fromScale(1.42,1.42))
+        artwork.AnchorPoint=Vector2.new(.5,.5);artwork.Active=false
+        alpha(artwork,"ImageTransparency",ICON_TRANSPARENCY)
+        artworkImages[asset][#artworkImages[asset]+1]=artwork
+        iconSprites[#iconSprites+1]={image=artwork,fallback=fallback,key=asset}
+    end
+    return host
+end
+local function tintIcon(host,color)
+    for _,line in ipairs(host:GetChildren()) do if line:IsA("Frame") then line.BackgroundColor3=color end end
+end
+local metallicColors={Color3.fromRGB(39,37,49),Color3.fromRGB(23,22,32),C.black,Color3.fromRGB(25,20,36)}
+-- VFX modules share the existing lifecycle and alpha compositor. No downloaded
+-- modules, global render bindings, or full-window CanvasGroup render targets.
+local VFX={images={},buttons={},reflections={items={},nextAt=5,serial=0}}
+
+-- Shared, built-in cyan accent. One translucent wash and the existing metallic
+-- stroke move together; gradients are allocated once, never rebuilt each frame.
+-- Independent phases keep navigation, surfaces and the toast from flashing in sync.
+local NeonFlow={};NeonFlow.__index=NeonFlow
+function NeonFlow.new(parent,name,radius,seed,edge)
+    local fill=frame(parent,name,UDim2.fromOffset(1,1),UDim2.new(1,-2,1,-2),Color3.new(1,1,1),1)
+    fill.Active=false;fill.ZIndex=3;corner(fill,radius)
+    local wash=gradient(fill,{C.deep,C.violet,C.cyan,C.ice,C.deep},26)
+    wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),
+        NumberSequenceKeypoint.new(.2,.75),NumberSequenceKeypoint.new(.48,.04),
+        NumberSequenceKeypoint.new(.70,.52),NumberSequenceKeypoint.new(1,1)})
+    return setmetatable({fill=fill,wash=wash,edge=edge,seed=seed},NeonFlow)
+end
+function NeonFlow:update(time,strength)
+    local phase=time*.48+self.seed
+    self.wash.Offset=Vector2.new(math.sin(phase)*.42,math.cos(phase*.67)*.07)
+    self.wash.Rotation=26+math.sin(phase*.73)*8
+    if self.edge then
+        self.edge.Offset=Vector2.new(math.sin(phase+.8)*.28,0)
+        self.edge.Rotation=24+math.sin(phase*.61)*15
+    end
+    alpha(self.fill,"BackgroundTransparency",1-strength)
+end
+local function shown(object)
+    while object and object~=UI.gui do
+        if object:IsA("GuiObject") and not object.Visible then return false end
+        object=object.Parent
+    end
+    return object~=nil
+end
+local function addReflection(object,light,strength)
+    local item={object=object,light=light,strength=strength or .1}
+    VFX.reflections.items[#VFX.reflections.items+1]=item
+    alpha(object,"BackgroundTransparency",1)
+    return item
+end
+function VFX.reflections:request(item)
+    if not item or not shown(item.object) then return end
+    if self.active then alpha(self.active.object,"BackgroundTransparency",1) end
+    self.active=item;self.elapsed=0;self.nextAt=state.phase+6.5
+end
+function VFX.reflections:update(dt)
+    local item=self.active
+    if item then
+        self.elapsed+=dt
+        local t=math.min(1,self.elapsed/.95)
+        if not shown(item.object) or t>=1 then
+            alpha(item.object,"BackgroundTransparency",1);self.active=nil
+        else
+            -- Only ONE diagonal highlight is active, regardless of hover spam.
+            item.light.Offset=Vector2.new(-1.15+2.3*t,0)
+            alpha(item.object,"BackgroundTransparency",1-math.sin(t*math.pi)^2*item.strength)
+        end
+    elseif state.phase>=self.nextAt and state.target=="open" then
+        self.nextAt=state.phase+7.5
+        for _=1,#self.items do
+            self.serial=self.serial%#self.items+1
+            local candidate=self.items[self.serial]
+            if shown(candidate.object) then self:request(candidate);break end
+        end
+    end
+end
+local buttons=VFX.buttons
+local function updateButtonLight(record)
+    local selected=record.selection.Value
+    local energy=record.energy.Value
+    alpha(record.selectionWash,"BackgroundTransparency",1-selected*.17)
+    alpha(record.edge,"Transparency",.58-selected*.32-energy*.18)
+    alpha(record.lip,"BackgroundTransparency",.84-selected*.19-energy*.18)
+end
+local function button(parent,name,pos,size)
+    local b=make("TextButton",parent,{Name=name,Text="",Position=pos,Size=size,BackgroundTransparency=1,AutoButtonColor=false,Selectable=true})
+    local face=frame(b,"MetalFace",UDim2.fromScale(.5,.5),UDim2.fromScale(1,1),Color3.new(1,1,1))
+    face.AnchorPoint=Vector2.new(.5,.5);corner(face,10)
+    local scale=make("UIScale",face,{Name="PressScale",Scale=1})
+    local wash=gradient(face,metallicColors,108)
+    local selectedWash=frame(face,"SelectionWash",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1),1)
+    corner(selectedWash,10);local selectedGradient=gradient(selectedWash,{C.cyan,C.deep,C.violet},110)
+    local edge=stroke(face,Color3.new(1,1,1),.58,1)
+    local edgeGradient=gradient(edge,{C.steel,C.cyan,C.silver,C.deep,C.violet},34)
+    local neon=NeonFlow.new(face,"OptionNeon",9,#buttons*1.17,edgeGradient)
+    neon.fill.ZIndex=1
+    local lip=frame(face,"MetalLip",UDim2.fromOffset(11,1),UDim2.new(1,-22,0,1),C.chrome,.84)
+    local lipGradient=gradient(lip,{C.violet,C.cyan,C.chrome},0);fadeGradient(lipGradient)
+    local sheen=frame(face,"Sheen",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),C.white,1)
+    corner(sheen,9); local light=gradient(sheen,{C.cyan,C.white,C.light},25); fadeGradient(light)
+    lip.ZIndex=2;sheen.ZIndex=2
+    local record={button=b,face=face,scale=scale,edge=edge,wash=wash,sheen=sheen,light=light,lip=lip,
+        selectionWash=selectedWash,selectedGradient=selectedGradient,neon=neon,hover=false,selected=false,pressed=false,
+        energy=make("NumberValue",b,{Name="InteractionLight",Value=0}),
+        selection=make("NumberValue",b,{Name="SelectionBlend",Value=0})}
+    record.reflection=addReflection(sheen,light,.13)
+    buttons[#buttons+1]=record
+    connect(record.energy.Changed,function() updateButtonLight(record) end)
+    connect(record.selection.Changed,function() updateButtonLight(record) end)
+    connect(b.MouseEnter,function() record.hover=true;tween(record.energy,.2,{Value=.65});VFX.reflections:request(record.reflection) end)
+    connect(b.MouseLeave,function() record.hover=false;if not record.pressed then tween(record.energy,.28,{Value=0}) end end)
+    connect(b.InputBegan,function(input)
+        if record.pressed then return end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            record.pressed=true;record.pointer=input
+            tween(scale,.09,{Scale=.977});tween(record.energy,.12,{Value=1})
+            VFX.reflections:request(record.reflection)
+        end
+    end)
+    connect(b.Activated,function() VFX.reflections:request(record.reflection) end)
+    return b,record
+end
+local function releaseButtons(input,force)
+    for _,record in ipairs(buttons) do
+        if record.pressed and (force or input==record.pointer or
+            (record.pointer.UserInputType==Enum.UserInputType.MouseButton1 and input.UserInputType==Enum.UserInputType.MouseButton1)) then
+            record.pressed=false;record.pointer=nil
+            tween(record.scale,.22,{Scale=1});tween(record.energy,.28,{Value=force and 0 or (record.hover and .65 or 0)})
+        end
+    end
+end
+connect(Input.InputEnded,function(input) releaseButtons(input,false) end)
+connect(Input.WindowFocusReleased,function() releaseButtons(nil,true) end)
+
+local function brandText(parent,name,pos,size,pixels)
+    local text=label(parent,name,"Reyzn",pos,size,pixels,C.white,Enum.Font.GrenzeGotisch)
+    text.TextColor3=Color3.new(1,1,1)
+    text.TextTruncate=Enum.TextTruncate.None
+    -- Static chrome bands keep the lettering crisp; only a rare separate sweep
+    -- moves. Text stays native and readable even when images cannot be loaded.
+    local metal=make("UIGradient",text,{Rotation=90,Color=ColorSequence.new({
+        ColorSequenceKeypoint.new(0,C.chrome),ColorSequenceKeypoint.new(.30,C.white),
+        ColorSequenceKeypoint.new(.50,C.muted),ColorSequenceKeypoint.new(.57,C.chrome),
+        ColorSequenceKeypoint.new(1,C.light)})})
+    local outline=make("UIStroke",text,{Color=C.black,Transparency=.28,Thickness=.8,ApplyStrokeMode=Enum.ApplyStrokeMode.Contextual})
+    return text,metal,outline
+end
+
+-- Standalone ScreenGui and animation scopes
+UI.gui=make("ScreenGui",playerGui,{Name="ReyznVehicleFly",ResetOnSpawn=false,DisplayOrder=67,ZIndexBehavior=Enum.ZIndexBehavior.Sibling,IgnoreGuiInset=false})
+pcall(function() UI.gui.ScreenInsets=Enum.ScreenInsets.CoreUISafeInsets end)
+UI.gui:SetAttribute("Version","1.0")
+UI.gui:SetAttribute("Design","Reyzn X | Amethyst Edition")
+UI.gui:SetAttribute("FlightEnabled",false)
+UI.windowFade=make("NumberValue",UI.gui,{Name="WindowOpacity",Value=1})
+UI.launcherFade=make("NumberValue",UI.gui,{Name="LauncherOpacity",Value=0})
+UI.paneProgress=make("NumberValue",UI.gui,{Name="PaneProgress",Value=1})
+UI.pageFade=make("NumberValue",UI.gui,{Name="PageOpacity",Value=1})
+UI.zoom=make("NumberValue",UI.gui,{Name="Zoom",Value=1})
+UI.screen=frame(UI.gui,"SafeArea",UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1)
+UI.window=frame(UI.screen,"Window",UDim2.fromOffset(60,60),UDim2.fromOffset(650,405),nil,1,"window")
+UI.window.ZIndex=3
+UI.window.ClipsDescendants=false
+UI.scale=make("UIScale",UI.window,{Scale=1})
+-- Four shallow light fields are clipped inside each surface. Their edge energy
+-- travels independently; no dark shadow extends below the bottom border.
+local InwardLight={};InwardLight.__index=InwardLight
+function InwardLight.new(parent,seed)
+    local self=setmetatable({fields={},seed=seed},InwardLight)
+    local clip=frame(parent,"InwardLight",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),nil,1)
+    clip.ZIndex=3;clip.ClipsDescendants=true;clip.Active=false
+    for side=1,4 do
+        local field=frame(clip,"InwardGlow",UDim2.fromScale(0,0),UDim2.fromScale(1,1),nil,1)
+        field.Active=false
+        local horizontal=side%2==1
+        field.Size=horizontal and UDim2.new(.58,0,0,26) or UDim2.new(0,24,.58,0)
+        local strips={}
+        -- Feather both dimensions: the cross-edge gradient fades inward, while
+        -- the strip weights fade both ends. No hard-ended glowing pills.
+        for i=1,9 do
+            local strip=frame(field,"GlowFeather",horizontal and UDim2.fromScale((i-1)/9,0) or UDim2.fromScale(0,(i-1)/9),
+                horizontal and UDim2.fromScale(1/9,1) or UDim2.fromScale(1,1/9),Color3.new(1,1,1),1)
+            strip.Active=false
+            local wash=gradient(strip,side%2==1 and {C.cyan,C.violet,C.deep} or {C.deep,C.violet,C.cyan},horizontal and 90 or 0)
+            local reverse=side==2 or side==3
+            wash.Transparency=NumberSequence.new({
+                NumberSequenceKeypoint.new(0,reverse and 1 or 0),
+                NumberSequenceKeypoint.new(.25,reverse and .96 or .55),
+                NumberSequenceKeypoint.new(.75,reverse and .55 or .96),
+                NumberSequenceKeypoint.new(1,reverse and 0 or 1)})
+            strips[i]={node=strip,weight=math.sin((i-.5)/9*math.pi)^2}
+        end
+        self.fields[side]={node=field,strips=strips}
+    end
+    return self
+end
+function InwardLight:update(time,burst)
+    for side,item in ipairs(self.fields) do
+        local travel=.21+.19*math.sin(time*.24+self.seed+side*1.7)
+        local node=item.node
+        if side==1 then node.Position=UDim2.new(travel,0,0,0)
+        elseif side==2 then node.Position=UDim2.new(1,-24,travel,0)
+        elseif side==3 then node.Position=UDim2.new(travel,0,1,-26)
+        else node.Position=UDim2.new(0,0,travel,0) end
+        local strength=.21+.06*math.sin(time*.7+self.seed+side)^2+burst*.025
+        for _,strip in ipairs(item.strips) do alpha(strip.node,"BackgroundTransparency",1-strength*strip.weight) end
+    end
+end
+local function background(parent,radius)
+    local image=imageLabel(parent,"InterfaceBackground",UDim2.fromOffset(1,1),UDim2.new(1,-2,1,-2))
+    image.ZIndex=2;image.ScaleType=Enum.ScaleType.Crop;image.Active=false
+    image.ImageColor3=Color3.new(1,1,1);corner(image,radius)
+    alpha(image,"ImageTransparency",BACKGROUND_TRANSPARENCY)
+    artworkImages.Background[#artworkImages.Background+1]=image
+    return image
+end
+-- The supplied emblem remains unchanged. Three low-opacity copies provide a
+-- traveling bloom and a narrow highlight; only gradients/alpha move each tick.
+local EmblemNeon={};EmblemNeon.__index=EmblemNeon
+function EmblemNeon.new(host)
+    local self=setmetatable({layers={}},EmblemNeon)
+    for i,data in ipairs({{"EmblemBloomWide",16,.40,0},{"EmblemBloomNear",6,.48,.5},{"EmblemSweep",0,.68,0}}) do
+        local image=imageLabel(host,data[1],UDim2.fromOffset(-data[2]/2,-data[2]/2),UDim2.new(1,data[2],1,data[2]))
+        image.ZIndex=i==3 and 4 or i;image.Active=false
+        local wash=gradient(image,{C.pink,C.light,C.violet,C.rose},0)
+        if i==3 then
+            wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1),NumberSequenceKeypoint.new(.26,1),
+                NumberSequenceKeypoint.new(.46,.08),NumberSequenceKeypoint.new(.54,.08),NumberSequenceKeypoint.new(.74,1),NumberSequenceKeypoint.new(1,1)})
+        end
+        alpha(image,"ImageTransparency",1)
+        artworkImages.Emblem[#artworkImages.Emblem+1]=image
+        self.layers[i]={image=image,wash=wash,strength=data[3],phase=data[4]}
+    end
+    return self
+end
+function EmblemNeon:update(time,burst)
+    local tint=C.pink:Lerp(C.orchid,.5+.5*math.sin(time*.8))
+    for _,layer in ipairs(self.layers) do
+        local progress=(time/4.8+layer.phase)%1
+        local envelope=math.sin(progress*math.pi)^2
+        layer.wash.Offset=Vector2.new(-.9+1.8*progress,0)
+        layer.image.ImageColor3=tint
+        alpha(layer.image,"ImageTransparency",1-envelope*(layer.strength+burst*.04))
+    end
+end
+local function surface(parent,name,pos,size,scope)
+    local o=frame(parent,name,pos,size,Color3.new(1,1,1),0,scope);corner(o,16)
+    gradient(o,{C.panel,C.base,C.black},100)
+    background(o,15)
+    local inward=InwardLight.new(o,name=="Dock" and .7 or 2.3)
+    local edge=stroke(o,Color3.new(1,1,1),.36,1)
+    local metal=gradient(edge,{C.steel,C.cyan,C.silver,C.violet,C.black,C.cyan},24)
+    local neon=NeonFlow.new(o,"SurfaceNeon",15,name=="Dock" and .45 or 2.8,metal)
+    local inner=frame(o,"InnerRim",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),nil,1)
+    corner(inner,14);stroke(inner,C.silver,.94,1)
+    local beam=frame(o,"EdgeLight",UDim2.fromOffset(16,0),UDim2.new(1,-32,0,1),C.white,.65)
+    local beamGradient=gradient(beam,{C.violet,C.cyan,C.silver},0);fadeGradient(beamGradient)
+    local sheen=frame(o,"SurfaceReflection",UDim2.fromOffset(3,3),UDim2.new(1,-6,1,-6),C.chrome,1)
+    corner(sheen,14);local sweep=gradient(sheen,{C.chrome,C.ice},28);fadeGradient(sweep)
+    inner.ZIndex=3;beam.ZIndex=3;sheen.ZIndex=3
+    addReflection(sheen,sweep,.035)
+    return o,{edge=edge,metal=metal,beam=beam,beamGradient=beamGradient,inward=inward,neon=neon}
+endlocal function noise(seed) return (math.sin(seed*12.9898+78.233)*43758.5453)%1 end
+local UpdraftFire={};UpdraftFire.__index=UpdraftFire
+local firePink=Color3.fromRGB(183,48,139)
+local firePurple=Color3.fromRGB(151,62,246)
+local fireCyan=C.cyan
+function UpdraftFire.new(parent,name,scope,width,height,wide,perimeter)
+    local host=frame(parent,name,UDim2.fromOffset(0,0),UDim2.fromOffset(width,height),nil,1,scope)
+    host.Active=false;host.ClipsDescendants=false;host.ZIndex=0
+    local self=setmetatable({host=host,roots={},wisps={},embers={},wide=wide,perimeter=perimeter},UpdraftFire)
+    local points={}
+    if perimeter then
+        for side,count in ipairs(perimeter) do
+            for i=1,count do points[#points+1]={side=side,fraction=(i-.5)/count} end
+        end
+    else
+        local count=wide and 12 or 8
+        for i=1,count do points[i]={fraction=(i-.5)/count} end
+    end
+    for i,point in ipairs(points) do
+        local seed=i*1.713+(perimeter and #name*.23 or 0)
+        local root=frame(host,"UpdraftRoot",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1),nil,1)
+        root.Active=false
+        local layers={}
+        for layer=1,2 do
+            local image=imageLabel(root,layer==1 and "UpdraftVeil" or "UpdraftBody",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
+            image.AnchorPoint=Vector2.new(.5,1);image.ScaleType=Enum.ScaleType.Stretch;image.Active=false
+            image.ImageRectOffset=Vector2.new(110,0);image.ImageRectSize=Vector2.new(1040,1254)
+            local wash=gradient(image,{firePink:Lerp(C.pink,.35),firePurple,C.light,fireCyan},90)
+            wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,.30),
+                NumberSequenceKeypoint.new(.2,.02),NumberSequenceKeypoint.new(.78,0),NumberSequenceKeypoint.new(1,1)})
+            alpha(image,"ImageTransparency",1)
+            layers[layer]=image;VFX.images[#VFX.images+1]=image
+        end
+        local core=imageLabel(root,"UpdraftCore",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
+        core.AnchorPoint=Vector2.new(.5,1);core.ScaleType=Enum.ScaleType.Stretch;core.Active=false
+        local coreLight=gradient(core,{firePurple,fireCyan,C.chrome},90)
+        coreLight.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,.2),
+            NumberSequenceKeypoint.new(.35,0),NumberSequenceKeypoint.new(.78,0),NumberSequenceKeypoint.new(1,1)})
+        alpha(core,"ImageTransparency",1)
+        VFX.images[#VFX.images+1]=core
+        self.roots[i]={node=root,layers=layers,core=core,seed=seed,
+            fraction=point.fraction,side=point.side,height=.85+noise(seed)*.29}
+    end
+    for i=1,wide and 8 or 6 do
+        local node=imageLabel(host,"RisingWisp",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
+        node.AnchorPoint=Vector2.new(.5,1);node.ScaleType=Enum.ScaleType.Stretch;node.Active=false
+        gradient(node,{firePink,firePurple,fireCyan},90);alpha(node,"ImageTransparency",1)
+        VFX.images[#VFX.images+1]=node
+        self.wisps[i]={node=node,seed=i*1.391,rate=.53+noise(i)*.17}
+    end
+    for i=1,8 do
+        local node=frame(host,"RisingEmber",UDim2.fromOffset(0,0),UDim2.fromOffset(1.3,3.5),i%2==0 and fireCyan or C.rose,1)
+        node.Active=false;node.AnchorPoint=Vector2.new(.5,.5);corner(node,2)
+        self.embers[i]={node=node,seed=i*.713,rate=.38+noise(i+6)*.22}
+    end
+    return self
+end
+function UpdraftFire:update(time,burst)
+    local w,h=self.host.Size.X.Offset,self.host.Size.Y.Offset
+    if w<20 or h<20 then return end
+    local count=#self.roots
+    for _,p in ipairs(self.roots) do
+        local baseX=-3+(w+6)*p.fraction
+        local baseY=h+2
+        local height=(h+(self.wide and 27 or 40))*p.height
+        local width=self.wide and (w+14)/count*2 or 47
+        if self.perimeter then
+            if p.side==1 or p.side==3 then
+                baseX=10+(w-20)*p.fraction
+                baseY=p.side==1 and 4 or h+13
+                width=math.clamp(w/self.perimeter[p.side]*1.4,18,66)
+                height=(p.side==1 and 64 or 55)*p.height
+            else
+                baseX=p.side==2 and w+3 or -3
+                baseY=16+(h-24)*p.fraction
+                width=38;height=math.clamp(h/self.perimeter[p.side]*1.45,66,92)*p.height
+            end
+        end
+        p.node.Position=UDim2.fromOffset(baseX,baseY)
+        for layer,image in ipairs(p.layers) do
+            local age=(time*(.61+noise(p.seed)*.18)+p.seed+(layer-1)*.5)%1
+            local envelope=math.sin(age*math.pi)^2
+            local bend=math.sin(time*2.5+p.seed)*2+math.sin(time*4.3-p.seed)*.7
+            image.Position=UDim2.fromOffset(bend+math.sin(age*math.pi)*(layer==1 and -3 or 3),-age*5)
+            image.Size=UDim2.fromOffset(width*(1.1-age*.2),height*(.73+age*.53))
+            image.Rotation=bend*(layer==1 and -1.5 or 2)
+            alpha(image,"ImageTransparency",1-envelope*(.87+burst*.04))
+        end
+        p.core.Position=UDim2.fromOffset(math.sin(time*3-p.seed)*1.5,0)
+        p.core.Size=UDim2.fromOffset(width*.63,height*.76)
+        p.core.Rotation=math.sin(time*2.6+p.seed)*3
+        alpha(p.core,"ImageTransparency",.64-.12*math.sin(time*3.1+p.seed)^2)
+    end
+    for _,p in ipairs(self.wisps) do
+        local age=(time*p.rate+p.seed)%1
+        local envelope=math.sin(age*math.pi)^2
+        local x=-5+(w+10)*noise(p.seed)+math.sin(age*4+p.seed)*5*age
+        local y=h+8-age*(h+(self.wide and 48 or 65))
+        if self.perimeter then
+            local side=math.floor(p.seed*10)%3
+            if side==0 then y=3-age*60
+            else x=side==1 and -8 or w+8;y=h*noise(p.seed+2)-age*62 end
+        end
+        p.node.Position=UDim2.fromOffset(x,y)
+        p.node.Size=UDim2.fromOffset((self.wide and 30 or 22)*(1-age*.38),42+age*13)
+        p.node.Rotation=math.sin(time*2+p.seed)*7
+        alpha(p.node,"ImageTransparency",1-envelope*.66)
+    end
+    for _,p in ipairs(self.embers) do
+        local age=(time*p.rate+p.seed)%1
+        local x=-8+(w+16)*noise(p.seed+4)+math.sin(age*5+p.seed)*4
+        local y=h+6-age*(h+54)
+        if self.perimeter then
+            local side=math.floor(p.seed*10)%3
+            if side==0 then y=-8-age*48
+            else x=(side==1 and -11 or w+11)+math.sin(age*5+p.seed)*3;y=h*noise(p.seed+5)-age*64 end
+        end
+        p.node.Position=UDim2.fromOffset(x,y)
+        alpha(p.node,"BackgroundTransparency",1-math.sin(age*math.pi)^2*.62)
+    end
+endlocal FeatureToggle={};FeatureToggle.__index=FeatureToggle
+function FeatureToggle.new(parent,name,title,controller)
+    local b=make("TextButton",parent,{Name=name,Text="",Position=UDim2.fromOffset(5,6),
+        Size=UDim2.fromOffset(340,60),BackgroundTransparency=1,AutoButtonColor=false,Active=true,Selectable=true})
+    local face=frame(b,"ToggleFace",UDim2.fromScale(.5,.5),UDim2.fromScale(1,1),Color3.new(1,1,1))
+    face.AnchorPoint=Vector2.new(.5,.5);corner(face,13)
+    gradient(face,{Color3.fromRGB(25,26,32),C.black,Color3.fromRGB(21,21,27)},26)
+    local scale=make("UIScale",face,{Name="TogglePressScale",Scale=1})
+    local glow=frame(b,"ToggleGlow",UDim2.fromOffset(-2,-2),UDim2.new(1,4,1,4),nil,1)
+    glow.Active=false;glow.ZIndex=0;corner(glow,15)
+    local glowEdge=stroke(glow,Color3.new(1,1,1),1,3)
+    local glowLight=gradient(glowEdge,{C.deep,C.violet,C.cyan,C.chrome,C.deep},24)
+    fadeGradient(glowLight)
+    local activeFace=frame(face,"ToggleActiveSurface",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1),1)
+    activeFace.Active=false;corner(activeFace,13)
+    gradient(activeFace,{Color3.fromRGB(19,30,42),C.black,Color3.fromRGB(25,17,34)},26)
+    local edge=stroke(face,C.steel,.64,1)
+    local edgeLight=gradient(edge,{C.deep,C.violet,C.cyan,C.chrome,C.rose},18)
+    edgeLight.Enabled=false
+    local neon=NeonFlow.new(face,"ToggleNeon",12,3.4,edgeLight)
+    local caption=label(face,"ToggleCaption",title,UDim2.fromOffset(16,0),UDim2.new(1,-104,1,0),20,C.muted,OPTION_FONT)
+    caption.Active=false;caption.ZIndex=4;caption.TextTruncate=Enum.TextTruncate.None
+    local pill=frame(face,"TogglePill",UDim2.new(1,-14,.5,0),UDim2.fromOffset(62,28),C.black)
+    pill.AnchorPoint=Vector2.new(1,.5);pill.Active=false;pill.ZIndex=4;corner(pill,9)
+    local pillEdge=stroke(pill,C.steel,.65,1)
+    local dot=frame(pill,"ToggleDot",UDim2.fromOffset(10,12),UDim2.fromOffset(4,4),C.steel)
+    dot.Active=false;corner(dot,4)
+    local status=label(pill,"ToggleStatus","OFF",UDim2.fromOffset(20,0),UDim2.new(1,-24,1,0),17,C.muted,OPTION_FONT)
+    status.Active=false;status.TextXAlignment=Enum.TextXAlignment.Center
+    local flash=frame(face,"ToggleFlash",UDim2.fromOffset(1,1),UDim2.new(1,-2,1,-2),Color3.new(1,1,1),1)
+    flash.Active=false;flash.ZIndex=3;corner(flash,12)
+    local flashLight=gradient(flash,{C.violet,C.cyan,C.chrome,C.cyan},24);fadeGradient(flashLight)
+    local lip=frame(face,"ToggleEdgeLight",UDim2.fromOffset(12,0),UDim2.new(1,-24,0,1),Color3.new(1,1,1),1)
+    lip.Active=false;lip.ZIndex=3
+    local lipLight=gradient(lip,{C.violet,C.cyan,C.chrome},0);fadeGradient(lipLight)
+    local self=setmetatable({button=b,face=face,controller=controller,attribute=name.."Enabled",scale=scale,activeFace=activeFace,
+        caption=caption,pill=pill,pillEdge=pillEdge,dot=dot,status=status,edge=edge,edgeLight=edgeLight,
+        glowEdge=glowEdge,glowLight=glowLight,neon=neon,flash=flash,flashLight=flashLight,lip=lip,lipLight=lipLight,
+        blend=make("NumberValue",b,{Name="ToggleBlend",Value=0}),
+        flashAmount=make("NumberValue",b,{Name="ToggleFlashAmount",Value=0})},FeatureToggle)
+    connect(self.blend.Changed,function() self:paint() end)
+    connect(self.flashAmount.Changed,function() self:paint() end)
+    connect(b.InputBegan,function(input)
+        if self.pointer or state.target=="closed" then return end
+        if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+            self.pointer=input;tween(scale,.09,{Scale=.978})
+        end
+    end)
+    connect(Input.InputEnded,function(input)
+        if self.pointer and (input==self.pointer or (self.pointer.UserInputType==Enum.UserInputType.MouseButton1
+            and input.UserInputType==Enum.UserInputType.MouseButton1)) then
+            self.pointer=nil;tween(scale,.22,{Scale=1})
+        end
+    end)
+    connect(Input.WindowFocusReleased,function() self.pointer=nil;tween(scale,.18,{Scale=1}) end)
+    connect(b.Activated,function()
+        if state.target=="closed" then return end
+        self:setEnabled(not controller.enabled)
+        scale.Scale=.978;tween(scale,.24,{Scale=1})
+    end)
+    b:SetAttribute("Enabled",false);UI.gui:SetAttribute(self.attribute,false);self:paint()
+    return self
+end
+function FeatureToggle:paint()
+    local blend=self.blend.Value
+    self.caption.TextColor3=C.muted:Lerp(C.white,blend)
+    self.status.TextColor3=C.muted:Lerp(C.cyan,blend)
+    self.dot.BackgroundColor3=C.steel:Lerp(C.cyan,blend)
+    self.pill.BackgroundColor3=C.black:Lerp(Color3.fromRGB(18,34,46),blend)
+    self.pillEdge.Color=C.steel:Lerp(C.cyan,blend)
+    self.edge.Color=C.steel:Lerp(Color3.new(1,1,1),blend)
+    self.edgeLight.Enabled=blend>.001
+    alpha(self.edge,"Transparency",.64-blend*.32)
+    alpha(self.pillEdge,"Transparency",.65-blend*.25)
+    alpha(self.activeFace,"BackgroundTransparency",1-blend)
+    alpha(self.neon.fill,"BackgroundTransparency",1-blend*.20)
+    alpha(self.glowEdge,"Transparency",1-blend*.30)
+    alpha(self.lip,"BackgroundTransparency",1-blend*.57)
+    alpha(self.flash,"BackgroundTransparency",1-self.flashAmount.Value*.36)
+end
+function FeatureToggle:setEnabled(enabled)
+    local actual=self.controller:setEnabled(enabled)
+    self.button:SetAttribute("Enabled",actual)
+    UI.gui:SetAttribute(self.attribute,actual)
+    self.status.Text=actual and "ON" or "OFF"
+    tween(self.blend,.26,{Value=actual and 1 or 0})
+    if tweens[self.flashAmount] then tweens[self.flashAmount]:Cancel();tweens[self.flashAmount]=nil end
+    self.flashAmount.Value=actual and 1 or 0
+    if actual then tween(self.flashAmount,.65,{Value=0}) end
+end
+function FeatureToggle:resize(width)
+    local w=math.min(340,math.max(96,width-16))
+    local compact=w<248
+    self.button.Size=UDim2.fromOffset(w,compact and 88 or 60)
+    self.caption.Position=UDim2.fromOffset(compact and 12 or 16,compact and 3 or 0)
+    self.caption.Size=compact and UDim2.new(1,-24,0,42) or UDim2.new(1,-104,1,0)
+    self.caption.TextSize=compact and 18 or 20;self.caption.TextWrapped=compact
+    self.pill.AnchorPoint=Vector2.new(1,compact and 1 or .5)
+    self.pill.Position=compact and UDim2.new(1,-12,1,-10) or UDim2.new(1,-14,.5,0)
+end
+function FeatureToggle:update(time)
+    if self.blend.Value<=.001 then return end
+    self.neon:update(time,self.blend.Value*.20)
+    self.glowLight.Offset=self.neon.wash.Offset
+    self.glowLight.Rotation=self.neon.wash.Rotation
+    self.lipLight.Offset=Vector2.new(math.sin(time*.65)*.30,0)
+    self.flashLight.Offset=Vector2.new((1-self.flashAmount.Value)*1.5-.75,0)
+end
+
+
+local active=true
+local session={seat=nil,root=nil,attachment=nil,linear=nil,orient=nil}
+local speed=95
+local keyboard,heldTouch={},{}
+local currentTab="Home"
+local collapsed=false
+local dragged=nil
+local minimized=false
+local width=650
+local height=405
+local dockW=160
+local panelW=482
+local extras={}
+local function addConnection(signal,fn)
+    local c=signal:Connect(fn)
+    extras[#extras+1]=c
+    return c
+end
+local function stop()
+    local line,orient,attach=session.linear,session.orient,session.attachment
+    session.linear,session.orient,session.attachment=nil,nil,nil
+    session.seat,session.root=nil,nil
+    if line then line:Destroy() end
+    if orient then orient:Destroy() end
+    if attach then attach:Destroy() end
+    table.clear(keyboard);table.clear(heldTouch)
+    UI.gui:SetAttribute("FlightEnabled",false)
+    if UI.pad then UI.pad.Visible=false end
+end
+local function getSeat()
+    local char=player.Character
+    local hum=char and char:FindFirstChildOfClass("Humanoid")
+    local seat=hum and hum.SeatPart
+    if not seat or not (seat:IsA("VehicleSeat") or seat:IsA("Seat")) or seat.Occupant~=hum then return nil,nil end
+    local root=seat.AssemblyRootPart or seat
+    if not seat:IsDescendantOf(workspace) or root.Anchored or seat.Anchored then return nil,nil end
+    return seat,root
+end
+local function start()
+    local seat,root=getSeat()
+    if not seat then
+        if UI.status then UI.status.Text="SIT IN A VEHICLE FIRST" end
+        return false
+    end
+    stop()
+    local attachment=Instance.new("Attachment")
+    attachment.Name="ReyznVehicleFly_Attachment"
+    attachment.Parent=root
+    local linear=Instance.new("LinearVelocity")
+    linear.Name="ReyznVehicleFly_Velocity"
+    linear.Attachment0=attachment
+    linear.RelativeTo=Enum.ActuatorRelativeTo.World
+    linear.VelocityConstraintMode=Enum.VelocityConstraintMode.Vector
+    linear.VectorVelocity=Vector3.zero
+    linear.MaxForce=math.huge
+    pcall(function()linear.ForceLimitsEnabled=false end)
+    linear.Parent=root
+    local orient=Instance.new("AlignOrientation")
+    orient.Name="ReyznVehicleFly_Orientation"
+    orient.Attachment0=attachment
+    orient.Mode=Enum.OrientationAlignmentMode.OneAttachment
+    orient.MaxTorque=math.huge
+    orient.Responsiveness=20
+    orient.RigidityEnabled=false
+    orient.CFrame=root.CFrame.Rotation
+    orient.Parent=root
+    session={seat=seat,root=root,attachment=attachment,linear=linear,orient=orient}
+    UI.gui:SetAttribute("FlightEnabled",true)
+    if UI.pad then UI.pad.Visible=Input.TouchEnabled end
+    if UI.status then UI.status.Text="FLIGHT ACTIVE  |  "..speed.." STUDS/S" end
+    state.burst=1
+    return true
+end
+features.fly={enabled=false}
+function features.fly:setEnabled(value)
+    if value==self.enabled then return self.enabled end
+    if value then
+        self.enabled=start()
+    else
+        self.enabled=false
+        stop()
+        if UI.status then UI.status.Text="FLIGHT DISABLED" end
+    end
+    return self.enabled
+end
+function features.fly:destroy()self.enabled=false;stop()end
+features.camera={enabled=true}
+function features.camera:setEnabled(value)self.enabled=value==true;return self.enabled end
+function features.camera:destroy()end
+features.level={enabled=true}
+function features.level:setEnabled(value)self.enabled=value==true;return self.enabled end
+function features.level:destroy()end
+
+-- Authentic Reyzn X dock / panel surfaces and chrome
+UI.dock,UI.dockFx=surface(UI.window,"Dock",UDim2.fromOffset(0,0),UDim2.fromOffset(160,405),"window")
+UI.panel,UI.panelFx=surface(UI.window,"Panel",UDim2.fromOffset(168,0),UDim2.fromOffset(482,405),"pane")
+UI.dock.ZIndex=3
+UI.panel.ZIndex=3
+UI.crown=icon(UI.dock,"crown",UDim2.fromOffset(15,16),22,C.light)
+UI.crown.ZIndex=4
+UI.brand=brandText(UI.dock,"Brand",UDim2.fromOffset(43,6),UDim2.fromOffset(116,47),25)
+UI.brand.ZIndex=4
+UI.dragArea=frame(UI.dock,"DockDrag",UDim2.fromOffset(0,0),UDim2.new(1,0,0,59),nil,1)
+UI.dragArea.Active=true;UI.dragArea.ZIndex=7
+local div=frame(UI.dock,"Division",UDim2.fromOffset(12,63),UDim2.new(1,-24,0,1),C.line,.2)
+gradient(div,{C.black,C.violet,C.black},0)
+UI.nav=frame(UI.dock,"Nav",UDim2.fromOffset(9,77),UDim2.new(1,-18,1,-139),nil,1)
+UI.nav.ZIndex=4
+local navigation={}
+local pageNames={{"Home","home"},{"Flight","spark"},{"Settings","settings"}}
+for index,item in ipairs(pageNames)do
+    local b,fx=button(UI.nav,"Tab_"..item[1],UDim2.fromOffset(0,(index-1)*53),UDim2.new(1,-3,0,44))
+    local glyph=icon(b,item[2],UDim2.fromOffset(9,10),22,C.silver)
+    local caption=label(b,"Caption",item[1],UDim2.fromOffset(42,0),UDim2.new(1,-44,1,0),19,C.muted,OPTION_FONT)
+    caption.ZIndex=4
+    navigation[item[1]]={button=b,fx=fx,icon=glyph,caption=caption,index=index}
+end
+UI.selectionLight=frame(UI.nav,"SelectionLight",UDim2.fromOffset(0,11),UDim2.fromOffset(2,21),C.chrome,.02)
+corner(UI.selectionLight,2);UI.selectionLight.ZIndex=5
+gradient(UI.selectionLight,{C.violet,C.cyan,C.chrome},90)
+
+UI.dockControls=frame(UI.dock,"WindowControls",UDim2.new(0,10,1,-49),UDim2.new(1,-20,0,37),nil,1)
+UI.dockControls.ZIndex=4
+for index,item in ipairs({{"Minimize","minimize"},{"Collapse","fold"},{"Close","close"}})do
+    local b,fx=button(UI.dockControls,item[1],UDim2.fromOffset((index-1)*47,0),UDim2.fromOffset(39,35))
+    local iconItem=icon(b,item[2],UDim2.fromOffset(8,6),22,C.silver)
+    iconItem.ZIndex=4
+    UI[item[1]]=b
+end
+
+UI.header=label(UI.panel,"Header","Vehicle Fly",UDim2.fromOffset(20,8),UDim2.new(1,-40,0,48),24,C.white,OPTION_FONT)
+UI.header.ZIndex=4
+UI.panelDrag=frame(UI.panel,"PanelDrag",UDim2.fromOffset(0,0),UDim2.new(1,0,0,60),nil,1)
+UI.panelDrag.Active=true;UI.panelDrag.ZIndex=7
+local headerLine=frame(UI.panel,"HeaderLine",UDim2.fromOffset(18,66),UDim2.new(1,-36,0,1),C.line,.2)
+gradient(headerLine,{C.steel,C.violet,C.silver},0)
+UI.content=frame(UI.panel,"PageContent",UDim2.fromOffset(14,78),UDim2.new(1,-28,1,-113),nil,1)
+UI.content.ZIndex=4;UI.content.ClipsDescendants=true
+local madeBy=label(UI.panel,"Credit","Made By Reyzn",UDim2.new(0,18,1,-28),UDim2.new(1,-36,0,20),11,C.muted)
+madeBy.TextXAlignment=Enum.TextXAlignment.Right;madeBy.ZIndex=4
+local pages={}
+for _,name in ipairs({"Home","Flight","Settings"})do
+    pages[name]=make("ScrollingFrame",UI.content,{
+        Name="Page_"..name,Position=UDim2.fromOffset(0,0),Size=UDim2.fromScale(1,1),
+        BackgroundTransparency=1,ScrollBarThickness=3,ScrollBarImageColor3=C.violet,
+        ScrollBarImageTransparency=.5,CanvasSize=UDim2.fromOffset(0,450),
+        Active=true,ScrollingEnabled=true,ClipsDescendants=true,Visible=name=="Home"
+    },"page")
+    pages[name].ZIndex=4
+end
+
+local hero=frame(pages.Home,"Hero",UDim2.fromOffset(2,2),UDim2.new(1,-10,0,215),C.base)
+hero.ZIndex=4;corner(hero,13)
+gradient(hero,{Color3.fromRGB(28,22,40),C.black,Color3.fromRGB(26,17,39)},32)
+local heroEdge=stroke(hero,C.chrome,.53,1)
+local heroMetal=gradient(heroEdge,{C.violet,C.cyan,C.silver,C.deep},28)
+UI.heroNeon=NeonFlow.new(hero,"HeroNeon",12,4.6,heroMetal)
+UI.heroTitle=brandText(hero,"HeroTitle",UDim2.fromOffset(16,10),UDim2.fromOffset(195,76),47)
+UI.heroTitle.ZIndex=6
+UI.heroStatus=label(hero,"Status","VEHICLE FLY\nStatus: Waiting for vehicle",UDim2.fromOffset(14,105),UDim2.new(1,-25,0,72),17,C.silver,OPTION_FONT)
+UI.heroStatus.ZIndex=6;UI.heroStatus.TextWrapped=true;UI.heroStatus.TextTruncate=Enum.TextTruncate.None
+local help=label(pages.Home,"Directions","Sit in the driver's seat, open FLIGHT and tap Vehicle Fly.\n\nPC: W A S D to move, E up, Q down.\nMobile: hold the floating control buttons.",UDim2.fromOffset(12,230),UDim2.new(1,-24,0,137),18,C.muted,OPTION_FONT)
+help.TextWrapped=true;help.TextTruncate=Enum.TextTruncate.None
+
+UI.status=label(pages.Flight,"FlightStatus","SIT IN A VEHICLE FIRST",UDim2.fromOffset(8,0),UDim2.new(1,-16,0,30),17,C.cyan,OPTION_FONT)
+UI.status.ZIndex=5
+UI.flightToggle=FeatureToggle.new(pages.Flight,"VehicleFly","Vehicle Fly",features.fly)
+UI.flightToggle.button.Position=UDim2.fromOffset(5,36)
+UI.speedTitle=label(pages.Flight,"SpeedTitle","FLIGHT SPEED",UDim2.fromOffset(12,140),UDim2.new(1,-24,0,30),20,C.white,OPTION_FONT)
+UI.speedTitle.ZIndex=5
+local function actionButton(parent,name,text,x,y,w,h)
+    local b,fx=button(parent,name,UDim2.fromOffset(x,y),UDim2.fromOffset(w,h))
+    b.Active=true
+    local caption=label(b,"Caption",text,UDim2.fromScale(0,0),UDim2.fromScale(1,1),21,C.white,OPTION_FONT)
+    caption.ZIndex=4;caption.TextXAlignment=Enum.TextXAlignment.Center;caption.Active=false
+    return b,fx
+end
+UI.minus=actionButton(pages.Flight,"SpeedMinus","−",12,176,54,49)
+UI.plus=actionButton(pages.Flight,"SpeedPlus","+",195,176,54,49)
+UI.speedValue=label(pages.Flight,"SpeedValue",tostring(speed),UDim2.fromOffset(78,177),UDim2.fromOffset(104,47),24,C.chrome,Enum.Font.RobotoMono)
+UI.speedValue.ZIndex=5;UI.speedValue.TextXAlignment=Enum.TextXAlignment.Center
+local units=label(pages.Flight,"Units","STUDS PER SECOND",UDim2.fromOffset(12,233),UDim2.new(1,-20,0,26),15,C.muted,OPTION_FONT)
+local hint=label(pages.Flight,"KeyHint","WASD: MOVE    E: UP    Q: DOWN\nTouch controls appear while flying on mobile.",UDim2.fromOffset(12,273),UDim2.new(1,-24,0,65),17,C.muted,OPTION_FONT)
+hint.TextWrapped=true;hint.TextTruncate=Enum.TextTruncate.None
+local function speedChange(steps)
+    speed=math.clamp(speed+steps,20,320)
+    UI.speedValue.Text=tostring(speed)
+    UI.gui:SetAttribute("FlightSpeed",speed)
+end
+connect(UI.minus.Activated,function()speedChange(-15)end)
+connect(UI.plus.Activated,function()speedChange(15)end)
+
+UI.cameraToggle=FeatureToggle.new(pages.Settings,"CameraSteering","Camera Steering",features.camera)
+UI.cameraToggle.button.Position=UDim2.fromOffset(5,7)
+UI.cameraToggle:setEnabled(true)
+UI.levelToggle=FeatureToggle.new(pages.Settings,"AutoLevel","Auto Level",features.level)
+UI.levelToggle.button.Position=UDim2.fromOffset(5,87)
+UI.levelToggle:setEnabled(true)
+local note=label(pages.Settings,"Notice",
+    "Vehicle flight is client-side. It depends on network ownership and the game's vehicle physics. Leaving the seat ends flight automatically.",
+    UDim2.fromOffset(12,184),UDim2.new(1,-24,0,105),17,C.muted,OPTION_FONT)
+note.TextWrapped=true;note.TextTruncate=Enum.TextTruncate.None
+
+-- Original animated updraft and icon launcher
+UI.launcher=make("ImageButton",UI.screen,{
+    Name="Launcher",Image="",BackgroundTransparency=1,Size=UDim2.fromOffset(68,68),
+    Position=UDim2.fromOffset(18,158),AutoButtonColor=false,Selectable=true,Visible=false
+},"launcher")
+UI.launcher.ZIndex=12
+UI.launcherPress=make("UIScale",UI.launcher,{Scale=1})
+UI.logoFallback=label(UI.launcher,"LogoFallback","R",UDim2.fromScale(0,0),UDim2.fromScale(1,1),35,C.white,Enum.Font.GothamBold)
+UI.logoFallback.TextXAlignment=Enum.TextXAlignment.Center;UI.logoFallback.ZIndex=13
+UI.logo=imageLabel(UI.launcher,"OriginalLauncherR",UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+UI.logo.ImageRectOffset=Vector2.new(88,104)
+UI.logo.ImageRectSize=Vector2.new(1080,1040)
+UI.logo.ZIndex=13
+UI.dockAura=UpdraftFire.new(UI.window,"DockAura","window",160,405,true,{4,6,3,6})
+UI.panelAura=UpdraftFire.new(UI.window,"PanelAura","pane",482,405,true,{12,6,9,6})
+UI.launcherAura=UpdraftFire.new(UI.launcher,"LauncherAura","launcher",68,68,false)
+
+-- Touch pad is separate from the movable window.
+UI.pad=frame(UI.screen,"MobileFlightPad",UDim2.new(1,-268,1,-210),UDim2.fromOffset(255,195),C.base,.16,"fixed")
+UI.pad.ZIndex=15;UI.pad.Visible=false
+corner(UI.pad,13)
+local padStroke=stroke(UI.pad,C.light,.45,1)
+gradient(padStroke,{C.violet,C.cyan,C.silver,C.deep},25)
+local padTitle=label(UI.pad,"PadTitle","REYZN VEHICLE FLIGHT",UDim2.fromOffset(8,1),UDim2.new(1,-16,0,23),13,C.silver,OPTION_FONT)
+padTitle.TextXAlignment=Enum.TextXAlignment.Center;padTitle.ZIndex=16
+local touchData={
+    {"forward","W",76,26,60,52},
+    {"left","A",10,79,60,52},
+    {"right","D",141,79,60,52},
+    {"back","S",76,132,60,52},
+    {"up","UP",207,26,43,52},
+    {"down","DN",207,132,43,52},
+}
+for _,data in ipairs(touchData)do
+    local action,display,x,y,w,h=unpack(data)
+    local b,fx=actionButton(UI.pad,"Touch_"..action,display,x,y,w,h)
+    b.ZIndex=16
+    connect(b.InputBegan,function(input)
+        if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
+            heldTouch[action]=input
+            tween(fx.selection,.12,{Value=1})
+        end
+    end)
+    connect(Input.InputEnded,function(input)
+        if heldTouch[action]==input or (heldTouch[action] and heldTouch[action].UserInputType==Enum.UserInputType.MouseButton1
+            and input.UserInputType==Enum.UserInputType.MouseButton1) then
+            heldTouch[action]=nil
+            tween(fx.selection,.16,{Value=0})
+        end
+    end)
+end
+local binds={
+    [Enum.KeyCode.W]="forward",[Enum.KeyCode.Up]="forward",
+    [Enum.KeyCode.S]="back",[Enum.KeyCode.Down]="back",
+    [Enum.KeyCode.A]="left",[Enum.KeyCode.Left]="left",
+    [Enum.KeyCode.D]="right",[Enum.KeyCode.Right]="right",
+    [Enum.KeyCode.E]="up",[Enum.KeyCode.Q]="down",
+}
+connect(Input.InputBegan,function(input,processed)
+    if processed or Input:GetFocusedTextBox() then return end
+    if input.UserInputType==Enum.UserInputType.Keyboard then
+        local action=binds[input.KeyCode]
+        if action then keyboard[input.KeyCode]=action end
+    end
+end)
+connect(Input.InputEnded,function(input)
+    if input.UserInputType==Enum.UserInputType.Keyboard then keyboard[input.KeyCode]=nil end
+end)
+connect(Input.WindowFocusReleased,function()
+    table.clear(keyboard)
+    table.clear(heldTouch)
+end)
+local function pressed(action)
+    if heldTouch[action] then return true end
+    for _,value in pairs(keyboard)do if value==action then return true end end
+    return false
+end
+connect(RunService.Heartbeat,function(dt)
+    if not features.fly.enabled then return end
+    local seat,root=getSeat()
+    if seat~=session.seat or root~=session.root or not session.linear or not session.linear.Parent
+       or not session.attachment or not session.attachment.Parent then
+        UI.flightToggle:setEnabled(false)
+        UI.status.Text="FLIGHT STOPPED | EXITED VEHICLE"
+        return
+    end
+    local camera=workspace.CurrentCamera
+    local f=(camera and camera.CFrame.LookVector) or root.CFrame.LookVector
+    local r=(camera and camera.CFrame.RightVector) or root.CFrame.RightVector
+    local front=Vector3.new(f.X,0,f.Z)
+    local right=Vector3.new(r.X,0,r.Z)
+    if front.Magnitude<.01 then
+        local original=root.CFrame.LookVector
+        front=Vector3.new(original.X,0,original.Z)
+    end
+    if front.Magnitude<.01 then front=Vector3.new(0,0,-1) end
+    front=front.Unit
+    if right.Magnitude<.01 then right=Vector3.new(-front.Z,0,front.X) end
+    right=right.Unit
+    local forward=(pressed("forward") and 1 or 0)-(pressed("back") and 1 or 0)
+    local sideways=(pressed("right") and 1 or 0)-(pressed("left") and 1 or 0)
+    local up=(pressed("up") and 1 or 0)-(pressed("down") and 1 or 0)
+    local desired=front*forward+right*sideways+Vector3.new(0,up,0)
+    if desired.Magnitude>1 then desired=desired.Unit end
+    session.linear.VectorVelocity=desired*speed
+    if session.orient then
+        session.orient.Enabled=features.level.enabled
+        if features.level.enabled then
+            local target=front
+            if not features.camera.enabled then
+                local facing=root.CFrame.LookVector
+                local flat=Vector3.new(facing.X,0,facing.Z)
+                if flat.Magnitude>.01 then target=flat.Unit end
+            end
+            session.orient.CFrame=CFrame.lookAt(Vector3.zero,target,Vector3.yAxis)
+        end
+    end
+end)
+
+local function choose(name)
+    currentTab=name
+    UI.header.Text=name=="Flight" and "Vehicle Fly" or name
+    for other,n in pairs(navigation)do
+        local selected=other==name
+        n.fx.selected=selected
+        tween(n.fx.selection,.23,{Value=selected and 1 or 0})
+        tween(n.caption,.2,{TextColor3=selected and C.white or C.muted})
+        tintIcon(n.icon,selected and C.light or C.silver)
+    end
+    tween(UI.selectionLight,.22,{Position=UDim2.fromOffset(0,(navigation[name].index-1)*53+10)})
+    for other,page in pairs(pages)do page.Visible=(other==name) end
+    UI.pageFade.Value=.1;tween(UI.pageFade,.23,{Value=1})
+end
+for name,n in pairs(navigation)do connect(n.button.Activated,function()choose(name)end)end
+local function resize(initial)
+    local vp=UI.screen.AbsoluteSize
+    if vp.X<1 or vp.Y<1 then return end
+    width=math.min(740,math.floor(vp.X*(vp.X<600 and .95 or .88)))
+    height=math.min(435,math.floor(vp.Y*.85))
+    dockW=vp.X<620 and 126 or 160
+    panelW=math.max(180,width-dockW-8)
+    UI.window.Size=UDim2.fromOffset(collapsed and dockW or width,height)
+    UI.dock.Size=UDim2.fromOffset(dockW,height)
+    UI.panel.Position=UDim2.fromOffset(dockW+8,0)
+    UI.panel.Size=UDim2.fromOffset(panelW,height)
+    UI.panel.Visible=not collapsed
+    UI.dockAura.host.Size=UI.dock.Size
+    UI.panelAura.host.Position=UI.panel.Position
+    UI.panelAura.host.Size=UI.panel.Size
+    UI.panelAura.host.Visible=not collapsed
+    UI.brand.Position=UDim2.fromOffset(dockW>=150 and 43 or 10,6)
+    UI.brand.Size=UDim2.fromOffset(dockW>=150 and 108 or 100,43)
+    UI.crown.Visible=dockW>=150
+    local controlW=math.floor((dockW-34)/3)
+    for i,name in ipairs({"Minimize","Collapse","Close"})do
+        UI[name].Position=UDim2.fromOffset((i-1)*(controlW+5),0)
+        UI[name].Size=UDim2.fromOffset(controlW,35)
+    end
+    UI.nav.Size=UDim2.new(1,-18,1,-139)
+    local toggleWidth=math.max(134,panelW-42)
+    UI.flightToggle:resize(toggleWidth)
+    UI.cameraToggle:resize(toggleWidth)
+    UI.levelToggle:resize(toggleWidth)
+    UI.levelToggle.button.Position=UDim2.fromOffset(5,UI.cameraToggle.button.Size.Y.Offset+27)
+    local adjustment=UI.flightToggle.button.Size.Y.Offset-60
+    UI.speedTitle.Position=UDim2.fromOffset(12,140+adjustment)
+    UI.minus.Position=UDim2.fromOffset(12,176+adjustment)
+    UI.plus.Position=UDim2.fromOffset(math.max(143,math.min(195,panelW-112)),176+adjustment)
+    UI.speedValue.Position=UDim2.fromOffset(75,177+adjustment)
+    units.Position=UDim2.fromOffset(12,233+adjustment)
+    hint.Position=UDim2.fromOffset(12,273+adjustment)
+    pages.Flight.CanvasSize=UDim2.fromOffset(0,395+adjustment)
+    pages.Home.CanvasSize=UDim2.fromOffset(0,390)
+    pages.Settings.CanvasSize=UDim2.fromOffset(0,340)
+    if initial then
+        UI.window.Position=UDim2.fromOffset(math.floor((vp.X-width)/2),math.floor((vp.Y-height)/2))
+        UI.launcher.Position=UDim2.fromOffset(18,math.max(10,math.floor(vp.Y*.5-34)))
+    end
+    UI.pad.Position=UDim2.new(1,-268,1,-math.min(213,vp.Y-8))
+end
+local function setMinimized(yes)
+    minimized=yes
+    UI.gui:SetAttribute("Minimized",yes)
+    if yes then
+        UI.launcher.Visible=true
+        tween(UI.windowFade,.25,{Value=0})
+        tween(UI.launcherFade,.26,{Value=1})
+        task.delay(.27,function()if state.alive and minimized then UI.window.Visible=false end end)
+    else
+        UI.window.Visible=true
+        tween(UI.windowFade,.27,{Value=1})
+        tween(UI.launcherFade,.23,{Value=0})
+        task.delay(.24,function()if state.alive and not minimized then UI.launcher.Visible=false end end)
+    end
+end
+connect(UI.Minimize.Activated,function()setMinimized(true)end)
+connect(UI.Collapse.Activated,function()collapsed=not collapsed;resize(false)end)
+connect(UI.Close.Activated,function()UI.gui:Destroy()end)
+connect(UI.launcher.Activated,function()
+    if state.suppressLauncherUntil and os.clock()<state.suppressLauncherUntil then return end
+    setMinimized(false)
+end)
+local function beginDrag(target,input)
+    local kind=input.UserInputType
+    if dragged or (kind~=Enum.UserInputType.MouseButton1 and kind~=Enum.UserInputType.Touch) then return end
+    dragged={target=target,input=input,start=input.Position,pos=target.Position,touch=kind==Enum.UserInputType.Touch,moved=false}
+end
+connect(UI.dragArea.InputBegan,function(input)beginDrag(UI.window,input)end)
+connect(UI.panelDrag.InputBegan,function(input)beginDrag(UI.window,input)end)
+connect(UI.launcher.InputBegan,function(input)beginDrag(UI.launcher,input)end)
+connect(Input.InputChanged,function(input)
+    if not dragged or (dragged.touch and input~=dragged.input) then return end
+    if not dragged.touch and input.UserInputType~=Enum.UserInputType.MouseMovement then return end
+    local delta=input.Position-dragged.start
+    if not dragged.moved and delta.Magnitude<5 then return end
+    dragged.moved=true
+    local p=dragged.pos
+    dragged.target.Position=UDim2.new(p.X.Scale,p.X.Offset+delta.X,p.Y.Scale,p.Y.Offset+delta.Y)
+end)
+connect(Input.InputEnded,function(input)
+    if not dragged or (dragged.touch and input~=dragged.input) then return end
+    if not dragged.touch and input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+    if dragged.target==UI.launcher and dragged.moved then state.suppressLauncherUntil=os.clock()+.5 end
+    dragged=nil
+end)
+connect(Input.WindowFocusReleased,function()dragged=nil end)
+connect(Input.InputBegan,function(input,processed)
+    if not processed and input.KeyCode==Enum.KeyCode.RightShift then setMinimized(not minimized) end
+end)
+local function shutdown()
+    if not state.alive then return end
+    stop()
+    state.alive=false
+    for _,c in ipairs(connections)do c:Disconnect()end
+    for _,c in ipairs(extras)do c:Disconnect()end
+    for _,t in pairs(tweens)do t:Cancel()end
+    for thread in pairs(threads)do if coroutine.status(thread)~="dead" then pcall(task.cancel,thread)end end
+end
+addConnection(UI.gui.Destroying,shutdown)
+
+-- Only original image assets are downloaded; no executable Lua is fetched.
+local base="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/assets/reyzn-x/"
+local specs={
+    {"background-cyber-v2.jpg","jpg",artworkImages.Background},
+    {"icon-home-v1.png","png",artworkImages.IconHome},
+    {"icon-visuals-v1.png","png",artworkImages.IconVisuals},
+    {"icon-settings-v1.png","png",artworkImages.IconSettings},
+    {"launcher-r-v1.png","png",{UI.logo}},
+    {"flame-wisp-v1.png","png",VFX.images},
+}
+for _,spec in ipairs(specs)do
+    spawn(function()
+        local custom=getcustomasset or getsynasset
+        if type(custom)~="function" or type(writefile)~="function" then return end
+        local file="ReyznVehicleFly_"..spec[1]
+        local uri
+        local okCached,isCached=pcall(function()return type(isfile)=="function" and isfile(file)end)
+        if okCached and isCached then
+            local worked,url=pcall(custom,file)
+            if worked then uri=url end
+        end
+        if not uri then
+            local ok,data=pcall(function()return game:HttpGet(base..spec[1])end)
+            if not state.alive then return end
+            if ok and type(data)=="string" and #data>1000 then
+                local valid=(spec[2]=="jpg" and data:sub(1,3)=="\255\216\255")
+                    or (spec[2]=="png" and data:sub(1,8)=="\137PNG\13\10\26\10")
+                if valid and pcall(writefile,file,data) then
+                    local worked,url=pcall(custom,file)
+                    if worked then uri=url end
+                end
+            end
+        end
+        if state.alive and type(uri)=="string" then
+            for _,sprite in ipairs(spec[3])do sprite.Image=uri end
+        end
+    end)
+end
+UI.gui:SetAttribute("FlightSpeed",speed)
+choose("Home")
+resize(true)
+refreshAlpha()
+for _,v in ipairs({UI.windowFade,UI.launcherFade,UI.pageFade,UI.paneProgress})do
+    connect(v.Changed,refreshAlpha)
+end
+connect(UI.screen:GetPropertyChangedSignal("AbsoluteSize"),function()resize(false)end)
+local lastStatus=0
+local phase,budget=0,0
+connect(RunService.RenderStepped,function(dt)
+    budget+=dt
+    if budget<1/60 then return end
+    local delta=budget;budget=budget%(1/60)
+    phase+=delta
+    state.phase=phase
+    state.burst=math.max(0,(state.burst or 0)-delta*2.6)
+    VFX.reflections:update(delta)
+    if UI.launcher.Visible then UI.launcherAura:update(phase,state.burst)end
+    if UI.window.Visible then
+        UI.dockAura:update(phase,state.burst)
+        if not collapsed then UI.panelAura:update(phase+.63,state.burst)end
+        for i,fx in ipairs({UI.dockFx,UI.panelFx})do
+            if i==1 or not collapsed then
+                fx.inward:update(phase,state.burst)
+                fx.neon:update(phase,.10+.02*math.sin(phase*.6)^2)
+                fx.beamGradient.Offset=Vector2.new(math.sin(phase*.2+i)*.3,0)
+            end
+        end
+        for _,record in ipairs(buttons)do
+            record.neon:update(phase,.085+record.selection.Value*.11+record.energy.Value*.04)
+            record.selectedGradient.Offset=record.neon.wash.Offset
+        end
+        if currentTab=="Home" and not collapsed then UI.heroNeon:update(phase,.08)end
+        if currentTab=="Flight" and not collapsed then UI.flightToggle:update(phase)end
+        if currentTab=="Settings" and not collapsed then
+            UI.cameraToggle:update(phase);UI.levelToggle:update(phase)
+        end
+    end
+    UI.logoFallback.Visible=UI.logo.Image=="" or not UI.logo.IsLoaded
+    for _,sprite in ipairs(iconSprites)do
+        local loaded=sprite.image.Image~="" and sprite.image.IsLoaded
+        for _,line in ipairs(sprite.fallback)do line.Visible=not loaded end
+    end
+    if phase-lastStatus>.4 then
+        lastStatus=phase
+        local seat=getSeat()
+        if not features.fly.enabled then
+            UI.heroStatus.Text=seat and "VEHICLE FLY\nStatus: Ready to fly" or "VEHICLE FLY\nStatus: Waiting for vehicle"
+            if seat and UI.status.Text=="SIT IN A VEHICLE FIRST" then UI.status.Text="READY | TAP VEHICLE FLY" end
+        else
+            UI.heroStatus.Text="VEHICLE FLY\nStatus: Flying at "..speed.." studs/s"
+        end
+    end
+end)
+return UI.gui
