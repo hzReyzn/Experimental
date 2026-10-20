@@ -689,6 +689,10 @@ local waterProperties={"WaterReflectance","WaterTransparency","WaterWaveSize","W
 local originals=nil
 local createdEffects={}
 local mutedEffects={}
+-- Other shaders (including the original mobile shader) can leave behind
+-- separate Sky and SunRays objects. Save and restore their precise states.
+local previousCelestials={}
+local previousSunRays={}
 local reflectiveParts={} -- each eligible horizontal BasePart tracks its own original reflectance
 local reflectCount=0
 local sheenCount=0
@@ -755,6 +759,15 @@ local function restoreShader()
     end
     table.clear(mutedEffects)
 
+    for sky,wasShown in pairs(previousCelestials) do
+        if sky and sky.Parent then safeWrite(sky,"CelestialBodiesShown",wasShown) end
+        previousCelestials[sky]=nil
+    end
+    for rays,wasEnabled in pairs(previousSunRays) do
+        if rays and rays.Parent then safeWrite(rays,"Enabled",wasEnabled) end
+        previousSunRays[rays]=nil
+    end
+
     -- Disconnect first so our persistence listener cannot undo restoration.
     for part,entry in pairs(reflectiveParts) do
         if entry.connection then entry.connection:Disconnect() end
@@ -787,24 +800,62 @@ local function restoreShader()
     UI.gui:SetAttribute("SheenSurfaces",0)
 end
 
+local function hideSkyCelestials(sky)
+    if not sky or not sky:IsA("Sky") or sky.Name=="ShadersX_SharpSunset" then return end
+    if previousCelestials[sky]==nil then
+        previousCelestials[sky]=safeRead(sky,"CelestialBodiesShown")
+    end
+    safeWrite(sky,"CelestialBodiesShown",false)
+end
+
+local function muteExtraSunRays(rays)
+    if not rays or not rays:IsA("SunRaysEffect") then return end
+    if previousSunRays[rays]==nil then
+        previousSunRays[rays]=safeRead(rays,"Enabled")
+    end
+    safeWrite(rays,"Enabled",false)
+end
+
 local function muteOverpoweringEffects()
-    -- Any leftover Blur from the original third script is temporarily
-    -- disabled and restored on OFF. Giant low-threshold Bloom is also muted.
-    -- Effects created by other scripts are NOT deleted.
-    for _,effect in ipairs(Lighting:GetChildren()) do
-        local shouldMute=false
-        if effect:IsA("BlurEffect") then
-            shouldMute=effect.Enabled
-        elseif effect:IsA("BloomEffect") then
-            shouldMute=effect.Enabled
-                and (effect.Size>=55 or effect.Threshold<=.15)
+    -- Respect old scripts' instances: only toggle their render states.
+    -- The previous version hid bodies only on our Sky; other Skies still
+    -- displayed Roblox's white procedural sun at the right side.
+    for _,effect in ipairs(Lighting:GetDescendants()) do
+        if effect:IsA("Sky") then
+            hideSkyCelestials(effect)
+        elseif effect:IsA("SunRaysEffect") then
+            muteExtraSunRays(effect)
+        elseif effect:IsA("BlurEffect") or effect:IsA("BloomEffect") then
+            local shouldMute=(effect:IsA("BlurEffect") and effect.Enabled)
+                or (effect:IsA("BloomEffect") and effect.Enabled
+                    and (effect.Size>=55 or effect.Threshold<=.15))
+            if shouldMute then
+                mutedEffects[#mutedEffects+1]={object=effect,enabled=effect.Enabled}
+                safeWrite(effect,"Enabled",false)
+            end
         end
-        if shouldMute then
-            mutedEffects[#mutedEffects+1]={object=effect,enabled=effect.Enabled}
-            safeWrite(effect,"Enabled",false)
+    end
+    -- SunRays are also valid when parented to the camera.
+    local camera=workspace.CurrentCamera
+    if camera then
+        for _,effect in ipairs(camera:GetDescendants()) do
+            if effect:IsA("SunRaysEffect") then
+                muteExtraSunRays(effect)
+            end
         end
     end
 end
+
+-- Also handle new skies/effects loaded by another script after Shaders X ON.
+connect(Lighting.DescendantAdded,function(effect)
+    if not shaderActive then return end
+    if effect:IsA("Sky") then
+        hideSkyCelestials(effect)
+    elseif effect:IsA("SunRaysEffect") then
+        muteExtraSunRays(effect)
+    end
+end)
+
 
 local function addEffect(effect)
     createdEffects[#createdEffects+1]=effect
@@ -1065,14 +1116,9 @@ local function enableShader()
         bloom.Enabled=true
         addEffect(bloom)
 
-        local rays=Instance.new("SunRaysEffect")
-        rays.Name="ShadersX_SunsetRays"
-        -- A mild but more visible halo when looking toward the real sun.
-        -- Roblox decides the final effect based on renderer and sun angle.
-        rays.Intensity=.085
-        rays.Spread=.82
-        rays.Enabled=true
-        addEffect(rays)
+        -- Intentionally do not create SunRaysEffect. Its rays follow the
+        -- REAL sun, not the orange sun baked into the sunset skybox.
+        -- The skybox already has a soft warm glow around its painted sun.
         -- No BlurEffect or DepthOfFieldEffect is created.
     end)
     if not success then
