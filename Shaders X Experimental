@@ -1038,7 +1038,11 @@ local function enableShader()
         sky.SkyboxFt="rbxassetid://323494130"
         sky.SkyboxDn="rbxassetid://323494368"
         sky.SkyboxRt="rbxassetid://323494067"
-        sky.SunAngularSize=8
+        -- The left sunset sun is baked into the six skybox images.
+        -- Hide Roblox's separate procedural white sun on the right.
+        sky.CelestialBodiesShown=false
+        sky.SunAngularSize=0
+        sky.MoonAngularSize=0
         sky.StarCount=0
         addEffect(sky)
 
