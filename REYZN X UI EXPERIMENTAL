@@ -808,9 +808,9 @@ UI.recoveryImage=imageLabel(UI.recovery,"RecoveryR",UDim2.fromScale(0,0),UDim2.f
 -- along its perimeter; it never rotates flames towards the sides or the bottom.
 local function noise(seed) return (math.sin(seed*12.9898+78.233)*43758.5453)%1 end
 local UpdraftFire={};UpdraftFire.__index=UpdraftFire
-local fireCrimsonShadow=Color3.fromRGB(150,16,39)
-local fireScarlet=C.emerald
-local fireRose=C.iceMint
+local fireJadeShadow=Color3.fromRGB(150,16,39)
+local fireEmerald=C.emerald
+local fireMint=C.iceMint
 function UpdraftFire.new(parent,name,scope,width,height,wide,perimeter)
     local host=frame(parent,name,UDim2.fromOffset(0,0),UDim2.fromOffset(width,height),nil,1,scope)
     host.Active=false;host.ClipsDescendants=false;host.ZIndex=0
