@@ -720,8 +720,10 @@ UI.launcherAura=UpdraftFire.new(UI.launcher,"LauncherAura","launcher",68,68,fals
 
 local VALID_KEY="reyzn-x-0809-2026"
 local GET_KEY_URL="https://link-hub.net/8852675/pQWADr5BVv0a"
--- V2 deliberately does not trust old V1 access files: they lacked an account ID.
-local ACCESS_FILE="ReyznX_KeyAccess_v2.txt"
+-- V3 supports up to five Roblox UserIds on the same executor's local filesystem.
+local ACCESS_FILE="ReyznX_KeyAccess_v3.txt"
+local PREVIOUS_ACCESS_FILE="ReyznX_KeyAccess_v2.txt"
+local MAX_ACCOUNTS=5
 local ACCOUNT_ID=tostring(player.UserId)
 local ORIGINAL_HUB="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/Reyzn%20X.lua"
 local env=(type(getgenv)=="function" and getgenv()) or _G
@@ -729,27 +731,56 @@ local launching=false
 local authorized=false
 local saved=false
 
--- Local, account-bound cache. This is not an online one-use-key database:
--- a copied public/static key can still be entered on a different installation.
-local function getBoundAccount()
+-- Read a device-local list of UserIds; migrate the first V2 account when needed.
+-- The limit is local only; it is not enforceable against edited/deleted files.
+local function readLocalFile(path)
     if type(readfile)~="function" or type(isfile)~="function" then return nil end
     local ok,value=pcall(function()
-        if isfile(ACCESS_FILE) then return readfile(ACCESS_FILE) end
+        if isfile(path) then return readfile(path) end
     end)
-    if not ok or type(value)~="string" then return nil end
-    local account,key=value:match("^ReyznX%-AccountBound%-v2\n(%d+)\n([^\r\n]+)%s*$")
-    if key~=VALID_KEY then return nil end
-    return account
+    return ok and type(value)=="string" and value or nil
+end
+local function getAuthorizedAccounts()
+    local accounts,seen={},{}
+    local function addAccount(id)
+        if type(id)=="string" and id:match("^%d+$")
+            and not seen[id] and #accounts<MAX_ACCOUNTS then
+            seen[id]=true
+            accounts[#accounts+1]=id
+        end
+    end
+    local record=readLocalFile(ACCESS_FILE)
+    if record then
+        local key,ids=record:match("^ReyznX%-MultiAccount%-v3\n([^\r\n]+)\n(.*)$")
+        if key==VALID_KEY then
+            for id in ids:gmatch("[^\r\n]+") do addAccount(id) end
+        end
+        return accounts
+    end
+    local previous=readLocalFile(PREVIOUS_ACCESS_FILE)
+    if previous then
+        local oldId,oldKey=previous:match("^ReyznX%-AccountBound%-v2\n(%d+)\n([^\r\n]+)%s*$")
+        if oldKey==VALID_KEY then addAccount(oldId) end
+    end
+    return accounts
 end
 local function readAuthorization()
-    return getBoundAccount()==ACCOUNT_ID
+    for _,id in ipairs(getAuthorizedAccounts()) do
+        if id==ACCOUNT_ID then return true end
+    end
+    return false
 end
 local function saveAuthorization()
-    local bound=getBoundAccount()
-    if bound and bound~=ACCOUNT_ID then return false end
-    if type(writefile)~="function" then return false end
-    local record="ReyznX-AccountBound-v2\n"..ACCOUNT_ID.."\n"..VALID_KEY
-    return pcall(function() writefile(ACCESS_FILE,record) end)
+    local accounts=getAuthorizedAccounts()
+    for _,id in ipairs(accounts) do
+        if id==ACCOUNT_ID then return true end
+    end
+    if #accounts>=MAX_ACCOUNTS then return false,"limit" end
+    if type(writefile)~="function" then return false,"unavailable" end
+    accounts[#accounts+1]=ACCOUNT_ID
+    local record="ReyznX-MultiAccount-v3\n"..VALID_KEY.."\n"..table.concat(accounts,"\n")
+    local ok=pcall(function() writefile(ACCESS_FILE,record) end)
+    return ok,ok and nil or "unavailable"
 end
 local function destroyLoader()
     if state.alive then UI.gui:Destroy() end
@@ -808,7 +839,7 @@ UI.keyStatus=label(UI.keyHost,"StatusMessage","Enter your key to continue.",
     UDim2.fromOffset(7,298),UDim2.new(1,-14,0,44),17,C.muted,OPTION_FONT)
 UI.keyStatus.TextWrapped=true;UI.keyStatus.TextTruncate=Enum.TextTruncate.None
 UI.keyStatus.ZIndex=4
-UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Access linked to Roblox account",
+UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Up to 5 Roblox accounts per device",
     UDim2.fromOffset(7,352),UDim2.new(1,-14,0,22),12,C.light,OPTION_FONT)
 
 -- Main now points to Home; all other tabs retain their locked-state messages.
@@ -836,11 +867,15 @@ for _,record in ipairs(buttons) do
 end
 local function setKeyStatus(message,kind)
     if not state.alive then return end
-    UI.keyStatus.Text=message
-    UI.keyStatus.TextColor3=kind=="success" and C.green
+    local color=kind=="success" and C.green
         or kind=="error" and C.pink
         or kind=="busy" and C.cyan
         or C.muted
+    UI.keyStatus.Text=message
+    UI.keyStatus.TextColor3=color
+    -- Show status above the input as well, since the lower line is scrollable.
+    UI.keyCaption.Text=message
+    UI.keyCaption.TextColor3=color
 end
 local function setSubmitBusy(busy)
     UI.keySubmit.Active=not busy
@@ -1025,12 +1060,6 @@ local function launchOriginal()
 end
 local function verifyKey()
     if launching or keyCountdown or not state.alive then return end
-    local boundAccount=getBoundAccount()
-    if boundAccount and boundAccount~=ACCOUNT_ID then
-        UI.keyInput.Text=""
-        setKeyStatus("This device's access is linked to another Roblox account.","error")
-        return
-    end
     if authorized then
         startKeyCountdown(5,"saved",launchOriginal)
         return
@@ -1049,12 +1078,18 @@ local function verifyKey()
         end)
         return
     end
-    authorized=true
-    saved=saveAuthorization()
+    local saveOK,saveError=saveAuthorization()
     UI.keyInput.Text=""
+    if saveError=="limit" then
+        setKeyStatus("Device limit reached: 5 Roblox accounts registered.","error")
+        return
+    end
+    authorized=true
+    saved=saveOK
     UI.statusValue.Text="Verified"
-    setKeyStatus(saved and "Access saved for this Roblox account." or
-        "Key accepted for this session; local saving unavailable.","success")
+    setKeyStatus(saved and
+        ("Account registered! Slots used: %d/%d."):format(#getAuthorizedAccounts(),MAX_ACCOUNTS)
+        or "Key accepted this session; local saving unavailable.","success")
     startKeyCountdown(3,"verification",launchOriginal)
 end
 connect(UI.keySubmit.Activated,verifyKey)
@@ -1430,10 +1465,13 @@ refreshAlpha()
 -- A session authorization from another Roblox account is never inherited.
 authorized=readAuthorization() or env.ReyznXKeySessionAuthorized==player.UserId
 saved=readAuthorization()
-local boundAccount=getBoundAccount()
-if boundAccount and boundAccount~=ACCOUNT_ID then
-    authorized=false
-    setKeyStatus("This device's access belongs to another Roblox account.","error")
+if not authorized then
+    local count=#getAuthorizedAccounts()
+    if count>=MAX_ACCOUNTS then
+        setKeyStatus("Device limit reached: 5/5 accounts registered.","error")
+    else
+        setKeyStatus(("Accounts registered: %d/%d. Enter key to add this account."):format(count,MAX_ACCOUNTS))
+    end
 end
 if authorized then
     -- Deliberately show the Key System for FIVE full seconds before launching.
