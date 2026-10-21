@@ -833,7 +833,7 @@ function UpdraftFire.new(parent,name,scope,width,height,wide,perimeter)
             local image=imageLabel(root,layer==1 and "UpdraftVeil" or "UpdraftBody",UDim2.fromOffset(0,0),UDim2.fromOffset(1,1))
             image.AnchorPoint=Vector2.new(.5,1);image.ScaleType=Enum.ScaleType.Stretch;image.Active=false
             image.ImageRectOffset=Vector2.new(110,0);image.ImageRectSize=Vector2.new(1040,1254)
-            local wash=gradient(image,{fireJadeShadow:Lerp(C.leaf,.35),fireEmerald,C.mint,fireMint},90)
+            local wash=gradient(image,{C.darkJade:Lerp(C.leaf,.35),fireEmerald,C.mint,fireMint},90)
             wash.Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,.30),
                 NumberSequenceKeypoint.new(.2,.02),NumberSequenceKeypoint.new(.78,0),NumberSequenceKeypoint.new(1,1)})
             alpha(image,"ImageTransparency",1)
