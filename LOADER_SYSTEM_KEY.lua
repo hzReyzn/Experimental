@@ -720,23 +720,36 @@ UI.launcherAura=UpdraftFire.new(UI.launcher,"LauncherAura","launcher",68,68,fals
 
 local VALID_KEY="reyzn-x-0809-2026"
 local GET_KEY_URL="https://link-hub.net/8852675/pQWADr5BVv0a"
-local ACCESS_FILE="ReyznX_KeyAccess_v1.txt"
+-- V2 deliberately does not trust old V1 access files: they lacked an account ID.
+local ACCESS_FILE="ReyznX_KeyAccess_v2.txt"
+local ACCOUNT_ID=tostring(player.UserId)
 local ORIGINAL_HUB="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/Reyzn%20X.lua"
 local env=(type(getgenv)=="function" and getgenv()) or _G
 local launching=false
 local authorized=false
 local saved=false
 
-local function readAuthorization()
-    if type(readfile)~="function" or type(isfile)~="function" then return false end
+-- Local, account-bound cache. This is not an online one-use-key database:
+-- a copied public/static key can still be entered on a different installation.
+local function getBoundAccount()
+    if type(readfile)~="function" or type(isfile)~="function" then return nil end
     local ok,value=pcall(function()
         if isfile(ACCESS_FILE) then return readfile(ACCESS_FILE) end
     end)
-    return ok and type(value)=="string" and value:match("^%s*(.-)%s*$")==VALID_KEY
+    if not ok or type(value)~="string" then return nil end
+    local account,key=value:match("^ReyznX%-AccountBound%-v2\n(%d+)\n([^\r\n]+)%s*$")
+    if key~=VALID_KEY then return nil end
+    return account
+end
+local function readAuthorization()
+    return getBoundAccount()==ACCOUNT_ID
 end
 local function saveAuthorization()
+    local bound=getBoundAccount()
+    if bound and bound~=ACCOUNT_ID then return false end
     if type(writefile)~="function" then return false end
-    return pcall(function() writefile(ACCESS_FILE,VALID_KEY) end)
+    local record="ReyznX-AccountBound-v2\n"..ACCOUNT_ID.."\n"..VALID_KEY
+    return pcall(function() writefile(ACCESS_FILE,record) end)
 end
 local function destroyLoader()
     if state.alive then UI.gui:Destroy() end
@@ -794,7 +807,7 @@ UI.keyStatus=label(UI.keyHost,"StatusMessage","Enter your key to continue.",
     UDim2.fromOffset(7,298),UDim2.new(1,-14,0,44),17,C.muted,OPTION_FONT)
 UI.keyStatus.TextWrapped=true;UI.keyStatus.TextTruncate=Enum.TextTruncate.None
 UI.keyStatus.ZIndex=4
-UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Remember access on this device",
+UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Access linked to Roblox account",
     UDim2.fromOffset(7,352),UDim2.new(1,-14,0,22),12,C.light,OPTION_FONT)
 
 -- Give other original tabs meaningful locked-state content instead of blank panes.
@@ -982,7 +995,7 @@ local function launchOriginal()
         if not state.alive then return end
         launching=false;setSubmitBusy(false)
         if ok then
-            env.ReyznXKeySessionAuthorized=true
+            env.ReyznXKeySessionAuthorized=player.UserId
             UI.statusValue.Text="Unlocked"
             setKeyStatus("Access verified. Reyzn X launched.","success")
             task.delay(.55,function()
@@ -1009,6 +1022,12 @@ local function launchOriginal()
 end
 local function verifyKey()
     if launching or keyCountdown or not state.alive then return end
+    local boundAccount=getBoundAccount()
+    if boundAccount and boundAccount~=ACCOUNT_ID then
+        UI.keyInput.Text=""
+        setKeyStatus("This device's access is linked to another Roblox account.","error")
+        return
+    end
     if authorized then
         startKeyCountdown(5,"saved",launchOriginal)
         return
@@ -1031,8 +1050,8 @@ local function verifyKey()
     saved=saveAuthorization()
     UI.keyInput.Text=""
     UI.statusValue.Text="Verified"
-    setKeyStatus(saved and "Access saved on this device." or
-        "Key accepted. Saving is unavailable on this executor.","success")
+    setKeyStatus(saved and "Access saved for this Roblox account." or
+        "Key accepted for this session; local saving unavailable.","success")
     startKeyCountdown(3,"verification",launchOriginal)
 end
 connect(UI.keySubmit.Activated,verifyKey)
@@ -1402,8 +1421,14 @@ refreshAlpha()
 
 -- Auto-launch is allowed only for a matching saved key or this session's
 -- earlier explicit authorization. No remote validation in this V1 prototype.
-authorized=readAuthorization() or env.ReyznXKeySessionAuthorized==true
+-- A session authorization from another Roblox account is never inherited.
+authorized=readAuthorization() or env.ReyznXKeySessionAuthorized==player.UserId
 saved=readAuthorization()
+local boundAccount=getBoundAccount()
+if boundAccount and boundAccount~=ACCOUNT_ID then
+    authorized=false
+    setKeyStatus("This device's access belongs to another Roblox account.","error")
+end
 if authorized then
     -- Deliberately show the Key System for FIVE full seconds before launching.
     -- Keeping ScreenGui enabled is necessary for the loading screen to render.
