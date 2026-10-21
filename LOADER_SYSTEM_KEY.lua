@@ -719,6 +719,7 @@ UI.launcherAura=UpdraftFire.new(UI.launcher,"LauncherAura","launcher",68,68,fals
 -- above are copied from Reyzn X Experimental, not hand-drawn imitations.
 
 local VALID_KEY="reyzn-x-0809-2026"
+local GET_KEY_URL="https://link-hub.net/8852675/pQWADr5BVv0a"
 local ACCESS_FILE="ReyznX_KeyAccess_v1.txt"
 local ORIGINAL_HUB="https://raw.githubusercontent.com/hzReyzn/Ghislain/main/Reyzn%20X.lua"
 local env=(type(getgenv)=="function" and getgenv()) or _G
@@ -748,7 +749,7 @@ connect(UI.gui.Destroying,function()
 end)
 
 -- The page layout and button chrome use Reyzn X's own factories.
-UI.keyHost=frame(pages.Main,"KeyAccessArea",UDim2.fromOffset(0,0),UDim2.fromOffset(440,314),nil,1)
+UI.keyHost=frame(pages.Main,"KeyAccessArea",UDim2.fromOffset(0,0),UDim2.fromOffset(440,380),nil,1)
 UI.keyLabel=label(UI.keyHost,"KeyHeading","REYZN X ACCESS",
     UDim2.fromOffset(7,5),UDim2.new(1,-14,0,44),27,C.white,OPTION_FONT)
 UI.keyLabel.TextTruncate=Enum.TextTruncate.None
@@ -781,12 +782,20 @@ UI.keySubmitCaption=label(UI.keySubmit,"ExecutableCaption","VERIFY & LAUNCH",
     UDim2.fromOffset(14,0),UDim2.new(1,-28,1,0),20,C.white,OPTION_FONT)
 UI.keySubmitCaption.TextXAlignment=Enum.TextXAlignment.Center
 UI.keySubmitCaption.TextWrapped=true;UI.keySubmitCaption.Active=false;UI.keySubmitCaption.ZIndex=4
+-- Copy the owner's key-acquisition URL; this button never validates or grants access.
+UI.keyGet,UI.keyGetFx=button(UI.keyHost,"GetKey",
+    UDim2.fromOffset(5,234),UDim2.new(1,-10,0,52))
+UI.keyGet.Active=true
+UI.keyGetCaption=label(UI.keyGet,"GetKeyCaption","GET KEY",
+    UDim2.fromOffset(14,0),UDim2.new(1,-28,1,0),19,C.white,OPTION_FONT)
+UI.keyGetCaption.TextXAlignment=Enum.TextXAlignment.Center
+UI.keyGetCaption.TextWrapped=true;UI.keyGetCaption.Active=false;UI.keyGetCaption.ZIndex=4
 UI.keyStatus=label(UI.keyHost,"StatusMessage","Enter your key to continue.",
-    UDim2.fromOffset(7,239),UDim2.new(1,-14,0,48),17,C.muted,OPTION_FONT)
+    UDim2.fromOffset(7,298),UDim2.new(1,-14,0,44),17,C.muted,OPTION_FONT)
 UI.keyStatus.TextWrapped=true;UI.keyStatus.TextTruncate=Enum.TextTruncate.None
 UI.keyStatus.ZIndex=4
 UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Remember access on this device",
-    UDim2.fromOffset(7,291),UDim2.new(1,-14,0,22),12,C.light,OPTION_FONT)
+    UDim2.fromOffset(7,352),UDim2.new(1,-14,0,22),12,C.light,OPTION_FONT)
 
 -- Give other original tabs meaningful locked-state content instead of blank panes.
 for _,name in ipairs({"Visuals","Scripts","Settings"}) do
@@ -1027,6 +1036,21 @@ local function verifyKey()
     startKeyCountdown(3,"verification",launchOriginal)
 end
 connect(UI.keySubmit.Activated,verifyKey)
+connect(UI.keyGet.Activated,function()
+    if not state.alive then return end
+    local copy=(type(setclipboard)=="function" and setclipboard)
+        or (type(toclipboard)=="function" and toclipboard)
+    if type(copy)~="function" then
+        setKeyStatus("Clipboard unavailable in this executor.","error")
+        return
+    end
+    local ok=pcall(copy,GET_KEY_URL)
+    if ok then
+        setKeyStatus("Get Key link copied to clipboard!","success")
+    else
+        setKeyStatus("Could not copy link to clipboard.","error")
+    end
+end)
 connect(UI.keyInput.FocusLost,function(enterPressed)
     if enterPressed then verifyKey() end
 end)
@@ -1129,14 +1153,15 @@ local function resize(initial)
     UI.content.Size=UDim2.new(1,-24,1,-headerH-48)
     local cw=pw-24
     local targetWidth=math.max(222,math.min(440,cw-12))
-    UI.keyHost.Size=UDim2.fromOffset(targetWidth,314)
+    UI.keyHost.Size=UDim2.fromOffset(targetWidth,380)
     UI.keyHost.Position=UDim2.fromOffset(math.max(4,(cw-targetWidth)/2),4)
     UI.keyLabel.TextSize=targetWidth<280 and 23 or 27
     UI.keyCaption.TextSize=targetWidth<280 and 15 or 17
     UI.keySubmitCaption.TextSize=targetWidth<280 and 18 or 20
+    UI.keyGetCaption.TextSize=targetWidth<280 and 17 or 19
     UI.keyFooter.TextSize=targetWidth<280 and 11 or 12
     pages.Main.ScrollingDirection=Enum.ScrollingDirection.XY
-    pages.Main.CanvasSize=UDim2.fromOffset(cw<targetWidth+10 and targetWidth+10 or 0,323)
+    pages.Main.CanvasSize=UDim2.fromOffset(cw<targetWidth+10 and targetWidth+10 or 0,395)
     for _,name in ipairs({"Visuals","Scripts","Settings"}) do
         pages[name].CanvasSize=UDim2.fromOffset(0,100)
     end
