@@ -761,8 +761,9 @@ connect(UI.gui.Destroying,function()
     end
 end)
 
+-- Show key access immediately on Home, keeping the original hero underneath.
 -- The page layout and button chrome use Reyzn X's own factories.
-UI.keyHost=frame(pages.Main,"KeyAccessArea",UDim2.fromOffset(0,0),UDim2.fromOffset(440,380),nil,1)
+UI.keyHost=frame(pages.Home,"KeyAccessArea",UDim2.fromOffset(0,0),UDim2.fromOffset(440,380),nil,1)
 UI.keyLabel=label(UI.keyHost,"KeyHeading","REYZN X ACCESS",
     UDim2.fromOffset(7,5),UDim2.new(1,-14,0,44),27,C.white,OPTION_FONT)
 UI.keyLabel.TextTruncate=Enum.TextTruncate.None
@@ -810,10 +811,12 @@ UI.keyStatus.ZIndex=4
 UI.keyFooter=label(UI.keyHost,"KeyFooter","Made By Reyzn   •   Access linked to Roblox account",
     UDim2.fromOffset(7,352),UDim2.new(1,-14,0,22),12,C.light,OPTION_FONT)
 
--- Give other original tabs meaningful locked-state content instead of blank panes.
-for _,name in ipairs({"Visuals","Scripts","Settings"}) do
+-- Main now points to Home; all other tabs retain their locked-state messages.
+for _,name in ipairs({"Main","Visuals","Scripts","Settings"}) do
     local page=pages[name]
-    local note=label(page,"LockedSection","Unlock Reyzn X to use "..name..".",
+    local message=name=="Main" and "Key System moved to Home. Open Home to enter your access key."
+        or "Unlock Reyzn X to use "..name.."."
+    local note=label(page,"LockedSection",message,
         UDim2.fromOffset(10,8),UDim2.new(1,-24,0,60),19,C.muted,OPTION_FONT)
     note.TextWrapped=true;note.TextTruncate=Enum.TextTruncate.None
 end
@@ -1179,12 +1182,11 @@ local function resize(initial)
     UI.keySubmitCaption.TextSize=targetWidth<280 and 18 or 20
     UI.keyGetCaption.TextSize=targetWidth<280 and 17 or 19
     UI.keyFooter.TextSize=targetWidth<280 and 11 or 12
-    pages.Main.ScrollingDirection=Enum.ScrollingDirection.XY
-    pages.Main.CanvasSize=UDim2.fromOffset(cw<targetWidth+10 and targetWidth+10 or 0,395)
-    for _,name in ipairs({"Visuals","Scripts","Settings"}) do
+    pages.Home.ScrollingDirection=Enum.ScrollingDirection.XY
+    for _,name in ipairs({"Main","Visuals","Scripts","Settings"}) do
         pages[name].CanvasSize=UDim2.fromOffset(0,100)
     end
-    -- The original Home hero is untouched.
+    -- Preserve the original Home hero below the new access form.
     local narrow=cw<360
     local heroHeight=narrow and 246 or math.min(262,math.max(156,h-8-headerH-54))
     UI.hero.Size=UDim2.new(1,-8,0,heroHeight)
@@ -1199,7 +1201,11 @@ local function resize(initial)
         or UDim2.new(1,-UI.emblemHost.Size.X.Offset-14,0,12)
     UI.status.Position=UDim2.fromOffset(narrow and 14 or 22,narrow and 172 or heroHeight-84)
     UI.status.Size=UDim2.fromOffset(narrow and cw-28 or math.min(206,cw*.46),58)
-    pages.Home.CanvasSize=UDim2.fromOffset(0,heroHeight+10)
+    UI.hero.Position=UDim2.fromOffset(1,UI.keyHost.Position.Y.Offset+UI.keyHost.Size.Y.Offset+16)
+    pages.Home.CanvasSize=UDim2.fromOffset(
+        cw<targetWidth+10 and targetWidth+10 or 0,
+        UI.hero.Position.Y.Offset+heroHeight+10
+    )
     applyPane();applyPage()
     if initial then recenter() end
 end
@@ -1220,7 +1226,7 @@ local function selectPage(name,collapse)
     state.page=name
     for other,page in pairs(pages) do page.Visible=other==name end
     pages[name].CanvasPosition=Vector2.zero
-    UI.pageTitle.Text=name=="Main" and "Key System" or name
+    UI.pageTitle.Text=name
     UI.pageTitle.FontFace=optionFont
     for other,n in pairs(navigation) do
         local selected=other==name
@@ -1404,15 +1410,15 @@ local function updateClock()
             math.floor(seconds/3600),math.floor(seconds/60)%60,seconds%60)
     end
 end
--- Preserve the selected Main tab and unchanged original navigation geometry.
-state.page="Main"
+-- Start on Home: the key form is available immediately.
+state.page="Home"
 UI.windowFade.Value=1
 UI.paneProgress.Value=1
 UI.pageFade.Value=1
 UI.launcherFade.Value=0
 UI.zoom.Value=1
 resize(true)
-selectPage("Main",false)
+selectPage("Home",false)
 UI.gui:SetAttribute("PanelOpen",true)
 UI.gui:SetAttribute("Minimized",false)
 UI.gui:SetAttribute("LocalKeyGate",true)
