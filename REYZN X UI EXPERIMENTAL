@@ -1,6 +1,6 @@
--- Reyzn X UI Experimental | Jade Luxury | Made By Reyzn
+-- Reyzn X UI Experimental | Crimson Obsidian | Made By Reyzn
 -- Visual copy of Ghislain/Reyzn X.lua at 893c7cbd037b8359974923abf8261a1d08f4215a.
--- Obsidian Green / Dark Jade / Emerald Jade / Ice Mint. Public version stays 1.0.
+-- Obsidian Black / Dark Crimson / Neon Scarlet / Rose Ice. Public version stays 1.0.
 -- Client GUI, opt-in features and explicitly requested external launchers.
 -- External code is fetched only when its own Scripts button is pressed.
 local Players = game:GetService("Players")
@@ -20,27 +20,27 @@ end
 
 -- Public version changes ONLY at the owner's explicit request.
 local VERSION = "1.0"
-local BUILD = "jade-ui-experimental-20261021"
+local BUILD = "crimson-ui-experimental-20261021"
 -- Roblox Creator Store: Rajdhani, published by Roblox. Use FontFace, not
 -- an invented Enum.Font entry. The brand and credit retain their own fonts.
 local OPTION_FONT = Font.new("rbxassetid://12187375422",Enum.FontWeight.SemiBold,Enum.FontStyle.Normal)
 local ICON_TRANSPARENCY, BACKGROUND_TRANSPARENCY = .85, .83
 local VFX_RATE = 60 -- Ultra High is fixed; no automatic quality reduction.
 local C = {
-    -- Obsidian Green: near-black surfaces with a restrained green cast.
-    base=Color3.fromRGB(7,16,13), panel=Color3.fromRGB(11,25,19),
-    black=Color3.fromRGB(4,10,8), steel=Color3.fromRGB(67,93,81),
-    silver=Color3.fromRGB(214,235,224), white=Color3.fromRGB(242,255,248),
-    muted=Color3.fromRGB(174,200,186), line=Color3.fromRGB(42,72,58),
-    -- Dark Jade provides depth; Emerald Jade carries the moving highlights.
-    emerald=Color3.fromRGB(34,197,139), mint=Color3.fromRGB(166,246,207),
-    darkJade=Color3.fromRGB(14,57,42), green=Color3.fromRGB(117,228,169),
-    frost=Color3.fromRGB(212,255,235), sage=Color3.fromRGB(112,178,145),
-    chrome=Color3.fromRGB(234,250,240), leaf=Color3.fromRGB(60,220,147),
-    jade=Color3.fromRGB(32,155,105), iceMint=Color3.fromRGB(190,255,225),
+    -- Obsidian Green: near-black surfaces with a restrained red cast.
+    base=Color3.fromRGB(17,8,11), panel=Color3.fromRGB(28,11,16),
+    black=Color3.fromRGB(11,4,7), steel=Color3.fromRGB(107,65,73),
+    silver=Color3.fromRGB(245,219,222), white=Color3.fromRGB(255,244,245),
+    muted=Color3.fromRGB(205,167,175), line=Color3.fromRGB(91,37,49),
+    -- Dark Crimson provides depth; Neon Scarlet carries the moving highlights.
+    emerald=Color3.fromRGB(225,36,65), mint=Color3.fromRGB(255,131,146),
+    darkJade=Color3.fromRGB(79,13,29), green=Color3.fromRGB(255,91,110),
+    frost=Color3.fromRGB(255,215,220), sage=Color3.fromRGB(184,87,103),
+    chrome=Color3.fromRGB(255,232,235), leaf=Color3.fromRGB(255,53,80),
+    jade=Color3.fromRGB(173,20,49), iceMint=Color3.fromRGB(255,173,182),
     -- A stronger native tint is needed for the existing colored PNG/JPEGs:
     -- a pale mint multiplier would leave their baked-in purple visible.
-    artworkFilter=Color3.fromRGB(16,255,64),
+    artworkFilter=Color3.fromRGB(255,35,35),
 }
 local function tintArtwork(color)
     return Color3.new(color.R*C.artworkFilter.R,color.G*C.artworkFilter.G,color.B*C.artworkFilter.B)
@@ -176,7 +176,7 @@ end
 local function tintIcon(host,color)
     for _,line in ipairs(host:GetChildren()) do if line:IsA("Frame") then line.BackgroundColor3=color end end
 end
-local metallicColors={Color3.fromRGB(26,43,35),Color3.fromRGB(13,28,21),C.black,Color3.fromRGB(12,32,23)}
+local metallicColors={Color3.fromRGB(49,22,29),Color3.fromRGB(34,13,20),C.black,Color3.fromRGB(41,12,22)}
 -- VFX modules share the existing lifecycle and alpha compositor. No downloaded
 -- modules, global render bindings, or full-window CanvasGroup render targets.
 local VFX={images={},buttons={},reflections={items={},nextAt=5,serial=0}}
@@ -748,7 +748,7 @@ UI.hero=frame(pages.Home,"Hero",UDim2.fromOffset(1,1),UDim2.new(1,-8,0,200),Colo
 corner(UI.hero,13)
 local heroEdge=stroke(UI.hero,Color3.new(1,1,1),.52)
 local heroMetal=gradient(heroEdge,{C.emerald,C.iceMint,C.silver,C.darkJade},28)
-gradient(UI.hero,{Color3.fromRGB(16,39,28),C.black,Color3.fromRGB(9,30,21)},32)
+gradient(UI.hero,{Color3.fromRGB(49,14,24),C.black,Color3.fromRGB(39,10,20)},32)
 local heroSheen=frame(UI.hero,"HeroReflection",UDim2.fromOffset(2,2),UDim2.new(1,-4,1,-4),C.chrome,1)
 corner(heroSheen,12);local heroSweep=gradient(heroSheen,{C.chrome,C.mint},28);fadeGradient(heroSweep)
 addReflection(heroSheen,heroSweep,.05)
@@ -808,9 +808,9 @@ UI.recoveryImage=imageLabel(UI.recovery,"RecoveryR",UDim2.fromScale(0,0),UDim2.f
 -- along its perimeter; it never rotates flames towards the sides or the bottom.
 local function noise(seed) return (math.sin(seed*12.9898+78.233)*43758.5453)%1 end
 local UpdraftFire={};UpdraftFire.__index=UpdraftFire
-local fireJadeShadow=Color3.fromRGB(27,130,84)
-local fireEmerald=C.emerald
-local fireMint=C.iceMint
+local fireCrimsonShadow=Color3.fromRGB(150,16,39)
+local fireScarlet=C.emerald
+local fireRose=C.iceMint
 function UpdraftFire.new(parent,name,scope,width,height,wide,perimeter)
     local host=frame(parent,name,UDim2.fromOffset(0,0),UDim2.fromOffset(width,height),nil,1,scope)
     host.Active=false;host.ClipsDescendants=false;host.ZIndex=0
@@ -940,13 +940,13 @@ function LoadToast.new()
     host.AnchorPoint=Vector2.new(1,1);host.ZIndex=12;host.Active=false;host.ClipsDescendants=false
     local face=frame(host,"NotificationFace",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1),0)
     face.ZIndex=2;face.Active=false;corner(face,14)
-    gradient(face,{Color3.fromRGB(13,33,25),C.black,Color3.fromRGB(12,27,19)},26)
+    gradient(face,{Color3.fromRGB(47,12,22),C.black,Color3.fromRGB(39,10,19)},26)
     local edge=stroke(face,Color3.new(1,1,1),.40,1)
     local edgeLight=gradient(edge,{C.darkJade,fireEmerald,fireMint,C.chrome,fireJadeShadow},18)
     local neon=NeonFlow.new(face,"NotificationNeon",13,1.9,edgeLight)
     local badge=frame(face,"SuccessBadge",UDim2.fromOffset(15,27),UDim2.fromOffset(34,34),Color3.new(1,1,1))
     badge.Active=false;badge.ZIndex=4;corner(badge,11)
-    gradient(badge,{Color3.fromRGB(24,56,41),Color3.fromRGB(9,24,17)},45)
+    gradient(badge,{Color3.fromRGB(76,19,32),Color3.fromRGB(35,9,16)},45)
     local badgeEdge=stroke(badge,C.iceMint,.46,1)
     gradient(badgeEdge,{C.emerald,C.iceMint,C.chrome},35)
     local badgeScale=make("UIScale",badge,{Scale=.94})
@@ -1046,7 +1046,7 @@ function DisasterToast.new()
     end
     local face=frame(host,"DisasterFace",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1))
     face.Active=false;face.ZIndex=2;corner(face,13)
-    gradient(face,{Color3.fromRGB(16,35,26),Color3.fromRGB(6,16,11),Color3.fromRGB(12,30,21)},24)
+    gradient(face,{Color3.fromRGB(47,12,23),Color3.fromRGB(20,5,10),Color3.fromRGB(40,10,20)},24)
     local edge=stroke(face,Color3.new(1,1,1),.28,1)
     local light=gradient(edge,{C.darkJade,C.emerald,C.iceMint,C.chrome,C.sage},22)
     local neon=NeonFlow.new(face,"DisasterNeon",12,7.4,light)
@@ -1175,7 +1175,7 @@ function FeatureToggle.new(parent,name,title,controller)
         Size=UDim2.fromOffset(340,60),BackgroundTransparency=1,AutoButtonColor=false,Active=true,Selectable=true})
     local face=frame(b,"ToggleFace",UDim2.fromScale(.5,.5),UDim2.fromScale(1,1),Color3.new(1,1,1))
     face.AnchorPoint=Vector2.new(.5,.5);corner(face,13)
-    gradient(face,{Color3.fromRGB(20,30,24),C.black,Color3.fromRGB(13,24,18)},26)
+    gradient(face,{Color3.fromRGB(45,17,24),C.black,Color3.fromRGB(35,10,17)},26)
     local scale=make("UIScale",face,{Name="TogglePressScale",Scale=1})
     local glow=frame(b,"ToggleGlow",UDim2.fromOffset(-2,-2),UDim2.new(1,4,1,4),nil,1)
     glow.Active=false;glow.ZIndex=0;corner(glow,15)
@@ -1184,7 +1184,7 @@ function FeatureToggle.new(parent,name,title,controller)
     fadeGradient(glowLight)
     local activeFace=frame(face,"ToggleActiveSurface",UDim2.fromScale(0,0),UDim2.fromScale(1,1),Color3.new(1,1,1),1)
     activeFace.Active=false;corner(activeFace,13)
-    gradient(activeFace,{Color3.fromRGB(13,33,25),C.black,Color3.fromRGB(12,27,19)},26)
+    gradient(activeFace,{Color3.fromRGB(47,12,22),C.black,Color3.fromRGB(39,10,19)},26)
     local edge=stroke(face,C.steel,.64,1)
     local edgeLight=gradient(edge,{C.darkJade,C.emerald,C.iceMint,C.chrome,C.sage},18)
     edgeLight.Enabled=false
@@ -1237,7 +1237,7 @@ function FeatureToggle:paint()
     self.caption.TextColor3=C.muted:Lerp(C.white,blend)
     self.status.TextColor3=C.muted:Lerp(C.iceMint,blend)
     self.dot.BackgroundColor3=C.steel:Lerp(C.iceMint,blend)
-    self.pill.BackgroundColor3=C.black:Lerp(Color3.fromRGB(12,43,30),blend)
+    self.pill.BackgroundColor3=C.black:Lerp(Color3.fromRGB(66,12,26),blend)
     self.pillEdge.Color=C.steel:Lerp(C.iceMint,blend)
     self.edge.Color=C.steel:Lerp(Color3.new(1,1,1),blend)
     self.edgeLight.Enabled=blend>.001
