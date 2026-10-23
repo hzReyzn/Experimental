@@ -2,7 +2,7 @@
 -- Standalone client script. Visual reference: Reyzn X UI Experimental.
 -- The original grayscale Reyzn flame is reused; UI/physics require no remote modules.
 -- Physics is client-owned and game-dependent. No server/remotes or network settings are changed.
--- Build 2026-10-23. One state machine, one physics pulse, bounded visual update rate.
+-- Build 2026-10-23-r2. NDS no-fall priority, rotational contact, health retreat, dense perimeter flames.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -25,11 +25,12 @@ local C = {
 }
 local S = {
     alive = true, closing = false, minimized = false, page = "Targets", selected = {},
-    loop = false, anti = true, self = true, void = true, noclip = false, back = true, high = true,
+    loop = false, all = false, nofall = true, anti = true, self = true, void = true, noclip = false, back = true, high = true,
     enabled = false, mode = "idle", epoch = 0, nextAt = 0, cursor = 0, queue = {},
     safe = nil, origin = nil, target = nil, attack = nil, restore = nil,
     localParts = {}, clipped = {}, guards = {}, rows = {}, links = {}, characterLinks = {},
-    tweens = {}, fire = {}, fadeEntries = {}, clock = 0, budget = 0, guardAt = 0, safeAt = 0,
+    tweens = {}, fire = {}, sheens = {}, fadeEntries = {}, clock = 0, budget = 0, guardAt = 0, safeAt = 0,
+    pauseUntil = 0, healthPaused = false, resumeWanted = false, avoidUntil = {},
     focused = true, fadeVersion = 0, statusUntil = 0, statusText = "Ready", moved = false,
 }
 local UI, Engine = {}, {}
@@ -100,6 +101,148 @@ local function avatar(player)
     return character, root, hum
 end
 
+local createNoFallLease = (function()
+-- Shared, client-local ownership of a velocity pulse. No callbacks yield here.
+-- The ledger lives in PlayerGui so separately executed scripts can cooperate
+-- without depending on shared Lua globals or on signal delivery order.
+return function(ownerGui, priority)
+    local parent = ownerGui.Parent
+    local ledger = parent:FindFirstChild("ReyznNoFallDamage_v1")
+    local function value(class, name, container, initial)
+        local object = Instance.new(class)
+        object.Name = name
+        object.Value = initial
+        object.Parent = container
+        return object
+    end
+    if not ledger then
+        ledger = Instance.new("Folder")
+        ledger.Name = "ReyznNoFallDamage_v1"
+        local clients = Instance.new("Folder")
+        clients.Name = "Clients"
+        clients.Parent = ledger
+        value("ObjectValue", "Owner", ledger, nil)
+        value("ObjectValue", "PendingOwner", ledger, nil)
+        value("ObjectValue", "Root", ledger, nil)
+        value("ObjectValue", "Character", ledger, nil)
+        value("Vector3Value", "Velocity", ledger, ZERO)
+        ledger.Parent = parent
+    end
+    local clients = ledger:FindFirstChild("Clients")
+    local owner = ledger:FindFirstChild("Owner")
+    local pending = ledger:FindFirstChild("PendingOwner")
+    local rootValue = ledger:FindFirstChild("Root")
+    local characterValue = ledger:FindFirstChild("Character")
+    local velocityValue = ledger:FindFirstChild("Velocity")
+    local token = value("ObjectValue", ownerGui.Name.."Lease", clients, ownerGui)
+    token:SetAttribute("Priority", priority)
+    token:SetAttribute("Enabled", false)
+    local disposed = false
+    local destructionConnection
+    local lease = {changed = owner:GetPropertyChangedSignal("Value")}
+
+    local function restorePending()
+        local root, character, velocity = rootValue.Value, characterValue.Value, velocityValue.Value
+        pending.Value = nil
+        rootValue.Value = nil
+        characterValue.Value = nil
+        if root and character and root.Parent == character and not root.Anchored
+            and root.AssemblyLinearVelocity == ZERO then
+            root.AssemblyLinearVelocity = velocity
+        end
+    end
+    local function chooseOwner()
+        local winner, best = nil, -math.huge
+        for _, candidate in ipairs(clients:GetChildren()) do
+            local gui = candidate.Value
+            local rank = candidate:GetAttribute("Priority")
+            if gui and gui.Parent == parent and candidate:GetAttribute("Enabled") and rank > best then
+                winner, best = candidate, rank
+            end
+        end
+        if owner.Value ~= winner then
+            -- Finish the outgoing pulse before publishing the incoming owner.
+            -- A queued restore from the old script then cannot touch the new one.
+            restorePending()
+            owner.Value = winner
+        end
+    end
+    function lease:isOwner()
+        return not disposed and owner.Value == token and token:GetAttribute("Enabled") == true
+    end
+    function lease:setEnabled(enabled)
+        if disposed then return end
+        if token:GetAttribute("Enabled") ~= enabled then
+            token:SetAttribute("Enabled", enabled)
+            chooseOwner()
+        end
+    end
+    function lease:restore()
+        if not disposed and pending.Value == token then restorePending() end
+    end
+    -- Other cooperating controllers read the real velocity even between the
+    -- zeroing and restoration phases. A correction invalidates that old pulse,
+    -- including corrections to zero, so it cannot be undone by a queued restore.
+    function lease:readVelocity(root)
+        local saved=not disposed and rootValue.Value
+        if saved and pending.Value and saved.Parent == characterValue.Value
+            and (saved==root or saved.AssemblyRootPart==root.AssemblyRootPart)
+            and root.AssemblyLinearVelocity == ZERO then
+            return velocityValue.Value
+        end
+        return root.AssemblyLinearVelocity
+    end
+    function lease:writeVelocity(root, velocity)
+        if disposed or not root.Parent then return end
+        local saved=rootValue.Value
+        if saved and (saved==root or saved.AssemblyRootPart==root.AssemblyRootPart) then
+            pending.Value = nil
+            rootValue.Value = nil
+            characterValue.Value = nil
+        end
+        root.AssemblyLinearVelocity = velocity
+    end
+    function lease:pulse(root)
+        if not self:isOwner() then return false end
+        self:restore()
+        if not root.Parent or root.Anchored then return false end
+        rootValue.Value = root
+        characterValue.Value = root.Parent
+        velocityValue.Value = root.AssemblyLinearVelocity
+        pending.Value = token
+        root.AssemblyLinearVelocity = ZERO
+        return true
+    end
+    function lease:destroy()
+        if disposed then return end
+        self:restore()
+        self:setEnabled(false)
+        disposed = true
+        if destructionConnection then destructionConnection:Disconnect() end
+        token:Destroy()
+        if #clients:GetChildren() == 0 then ledger:Destroy() end
+    end
+    destructionConnection = ownerGui.Destroying:Connect(function() lease:destroy() end)
+    return lease
+end
+end)()
+-- NDS uses the same no-fall lease protocol as Reyzn X. The main Hub keeps
+-- priority 100; this standalone fallback uses 50, never double-pulsing a root.
+local NoFall = {supported = game.PlaceId == 189707}
+function NoFall.refresh()
+    if S.noFallLease then S.noFallLease:setEnabled(NoFall.supported and S.nofall) end
+end
+function NoFall.restore()
+    if S.noFallLease then S.noFallLease:restore() end
+end
+function NoFall.pulse()
+    if not NoFall.supported or not S.nofall or not S.noFallLease then return end
+    local character, root = avatar(LP)
+    if character == S.character and root and not root.Anchored and root.Position.Y > bottom() + 4 then
+        S.noFallLease:pulse(root)
+    end
+end
+
 -- Respect Reyzn X's no-fall pulse if it is present. Never acquire, disable, or
 -- replace its owner; an intentional correction only updates the saved velocity.
 local function noFallValues(root)
@@ -149,6 +292,7 @@ function Engine.releasePhysics()
     local lease = S.restore
     S.restore = nil
     if not lease then return end
+    if lease.mapFolder then lease.mapFolder:Destroy() end
     for part, saved in pairs(lease.parts) do
         if part.Parent then
             part.CanCollide = saved.collide
@@ -160,6 +304,8 @@ function Engine.releasePhysics()
         hum.AutoRotate = lease.autoRotate
         hum.PlatformStand = lease.platform
         hum:SetStateEnabled(Enum.HumanoidStateType.Seated, lease.seated)
+        hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, lease.falling)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, lease.ragdoll)
         if hum.Health > 0 and not lease.platform then hum:ChangeState(Enum.HumanoidStateType.GettingUp) end
     end
     local camera = lease.camera
@@ -179,18 +325,54 @@ function Engine.acquirePhysics(character, root, hum, targetHum)
     local camera = Workspace.CurrentCamera
     S.restore = {parts = {}, hum = hum, root = root, autoRotate = hum.AutoRotate,
         platform = hum.PlatformStand, seated = hum:GetStateEnabled(Enum.HumanoidStateType.Seated),
-        camera = camera, subject = camera and camera.CameraSubject, watch = targetHum}
+        falling = hum:GetStateEnabled(Enum.HumanoidStateType.FallingDown),
+        ragdoll = hum:GetStateEnabled(Enum.HumanoidStateType.Ragdoll),
+        camera = camera, subject = camera and camera.CameraSubject, watch = targetHum,
+        mapFolder = make("Folder", character, {Name = "FlingXContactGuards"}), mapPairs = {}, mapAt = 0}
     for part in pairs(S.localParts) do
         if part.Parent then
             S.restore.parts[part] = {collide = part.CanCollide, physical = part.CustomPhysicalProperties}
-            if bodyCore(part) then part.CustomPhysicalProperties = PhysicalProperties.new(65, .3, .35, 1, 1) end
+            if part == root then part.CustomPhysicalProperties = PhysicalProperties.new(5, .65, 0, 100, 100) end
+            part.CanCollide = false
         end
     end
     hum.AutoRotate = false
     hum.Sit = false
     hum.PlatformStand = true
     hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+    hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+    hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
     if camera then camera.CameraSubject = targetHum end
+end
+
+-- Prevent the contact collider from striking scenery. This is a bounded nearby
+-- query, never a scan of the whole map; the target is excluded from these guards.
+function Engine.guardScenery(position, now)
+    local lease = S.restore
+    if not lease or now < lease.mapAt then return end
+    lease.mapAt = now + .08
+    local params = OverlapParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local excluded = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Character then excluded[#excluded + 1] = player.Character end
+    end
+    params.FilterDescendantsInstances = excluded
+    params.MaxParts = 96
+    params.RespectCanCollide = true
+    local seen = {}
+    for _, part in ipairs(Workspace:GetPartBoundsInRadius(position, 9, params)) do
+        if part:IsA("BasePart") and part.CanCollide then
+            seen[part] = true
+            if not lease.mapPairs[part] then
+                lease.mapPairs[part] = make("NoCollisionConstraint", lease.mapFolder,
+                    {Name = "SceneryGuard", Part0 = S.root, Part1 = part, Enabled = true})
+            end
+        end
+    end
+    for part, constraint in pairs(lease.mapPairs) do
+        if not seen[part] then constraint:Destroy(); lease.mapPairs[part] = nil end
+    end
 end
 
 -- Only local collision constraints are used for Anti-Fling. Other players'
@@ -316,21 +498,25 @@ function Engine.saveGround(now)
     end
 end
 
+function Engine.isSelected(player)
+    return player ~= LP and (S.all or S.selected[player.UserId] == true)
+end
 function Engine.targets()
     local queue = {}
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LP and S.selected[player.UserId] then queue[#queue + 1] = player end
+        if Engine.isSelected(player) then queue[#queue + 1] = player end
     end
     table.sort(queue, function(a, b) return a.UserId < b.UserId end)
     return queue
 end
 function Engine.refresh()
     if not UI.action then return end
-    UI.actionText.Text = S.enabled and "FLING  ON" or "FLING  OFF"
-    UI.actionMark.Text = S.enabled and "■" or "→"
-    UI.actionText.TextColor3 = S.enabled and C.coal or C.white
+    local running = S.enabled or S.resumeWanted
+    UI.actionText.Text = S.resumeWanted and "WAITING" or (S.healthPaused and S.enabled and "FLING  PAUSED") or (S.enabled and "FLING  ON" or "FLING  OFF")
+    UI.actionMark.Text = running and "■" or "→"
+    UI.actionText.TextColor3 = running and C.coal or C.white
     UI.actionMark.TextColor3 = UI.actionText.TextColor3
-    UI.actionGradient.Color = S.enabled and ColorSequence.new(C.white, C.silver) or ColorSequence.new(C.steel, C.dark)
+    UI.actionGradient.Color = running and ColorSequence.new(C.white, C.silver) or ColorSequence.new(C.steel, C.dark)
     UI.activeDot.BackgroundColor3 = S.enabled and C.white or C.steel
     UI.gui:SetAttribute("FlingEnabled", S.enabled)
     UI.gui:SetAttribute("Mode", S.mode)
@@ -353,7 +539,8 @@ function Engine.beginRecovery(destination, message, final)
 end
 function Engine.stop(message, emergency, immediate)
     local hadSession = S.enabled or S.mode == "fling" or S.mode == "recover" or S.restore ~= nil
-    S.enabled = false
+    S.enabled, S.resumeWanted, S.healthPaused = false, false, false
+    S.pauseUntil = 0
     local destination
     if emergency then
         destination = (Engine.resolve(S.safe) and S.safe) or (Engine.resolve(S.origin) and S.origin) or nil
@@ -373,37 +560,58 @@ function Engine.stop(message, emergency, immediate)
     end
     Engine.refresh()
 end
+function Engine.characterLost(message)
+    local resume = S.loop and (S.enabled or S.resumeWanted)
+    Engine.stop(message, false, true)
+    S.resumeWanted = resume
+    Engine.refresh()
+end
 function Engine.start()
-    if S.enabled then Engine.stop("Stopped"); return end
+    if S.enabled or S.resumeWanted then Engine.stop("Stopped"); return end
     if S.mode == "recover" then status("Stabilizing", .5); return end
     local character, root, hum = avatar(LP)
     if not character or character ~= S.character then status("Waiting for character", 3); return end
     if root.Anchored then status("Character is anchored", 3); return end
     if hum.Sit or hum.SeatPart or hum.PlatformStand then status("Stand up first", 3); return end
+    if hum.Health < hum.MaxHealth * .65 then status("Health too low", 3); return end
     local queue = Engine.targets()
-    if #queue == 0 then status("Select a player", 3); return end
+    if #queue == 0 and not (S.all and S.loop) then status("Select a player", 3); return end
     S.origin = Engine.snapshot(true) or Engine.snapshot(false)
     if not S.origin then status("Move to safe ground", 3); return end
+    if NoFall.supported then
+        S.nofall = true; NoFall.refresh()
+        if UI.switches then UI.switches.nofall.refresh(true) end
+    end
     S.queue, S.cursor, S.nextAt, S.completed = queue, 0, os.clock(), 0
+    S.pauseUntil, S.healthPaused = 0, false
     S.enabled, S.mode, S.passObserved = true, "wait", false
     status("Starting")
     Engine.refresh()
 end
 function Engine.nextTarget(now)
     if now < S.nextAt or not S.enabled then return end
+    if now < S.pauseUntil then return end
+    if S.healthPaused then
+        if S.hum.Health < S.hum.MaxHealth * .80 then return end
+        S.healthPaused = false; Engine.refresh()
+    end
     if S.cursor >= #S.queue then
         if not S.loop then
             Engine.stop(S.passObserved and "Cycle complete" or "No launch observed")
             return
         end
         S.queue, S.cursor = Engine.targets(), 0
-        if #S.queue == 0 then Engine.stop("Select a player"); return end
+        if #S.queue == 0 then
+            if S.all then S.nextAt = now + 1; status("Waiting for players"); return end
+            Engine.stop("Select a player"); return
+        end
+        S.passObserved = false
     end
     S.cursor = S.cursor + 1
     local player = S.queue[S.cursor]
-    if player.Parent ~= Players or not S.selected[player.UserId] then S.nextAt = now + .12; return end
+    if player.Parent ~= Players or not Engine.isSelected(player) or now < (S.avoidUntil[player.UserId] or 0) then S.nextAt = now + .12; return end
     local targetChar, targetRoot, targetHum = avatar(player)
-    if not targetChar or targetRoot.Anchored or not validVector(targetRoot.Position)
+    if not targetChar or targetRoot.Anchored or targetChar:FindFirstChildOfClass("ForceField") or not validVector(targetRoot.Position)
         or targetRoot.Position.Y <= bottom() + 70 then
         status("Target unavailable", 1); S.nextAt = now + .25; return
     end
@@ -414,20 +622,32 @@ function Engine.nextTarget(now)
     Engine.clearGuards(player)
     Engine.acquirePhysics(character, root, hum, targetHum)
     S.attack = {player = player, character = targetChar, root = targetRoot, hum = targetHum,
-        contact = contact, started = now, initial = targetRoot.Position, frame = 0,
+        contact = contact, started = now, initial = targetRoot.Position, frame = 0, initialHealth = hum.Health,
         offset = root.CFrame:ToObjectSpace(character:GetPivot())}
     S.mode = "fling"
     status("Fling · " .. player.DisplayName)
     Engine.refresh()
 end
 function Engine.finishTarget(message, observed)
+    if not S.attack and S.mode ~= "fling" then return end
     if observed then S.passObserved = true end
     S.completed = S.completed + 1
     Engine.beginRecovery(S.back and S.origin or nil, message, false)
 end
+function Engine.healthChanged(health)
+    local previous = S.lastHealth or health
+    S.lastHealth = health
+    if not S.enabled or health <= 0 or health >= previous - .1 then return end
+    local target = S.target
+    if target then S.avoidUntil[target.UserId] = os.clock() + 12 end
+    S.pauseUntil = os.clock() + 3
+    S.healthPaused = health < S.hum.MaxHealth * .65
+    local destination = (Engine.resolve(S.origin) and S.origin) or S.safe
+    Engine.beginRecovery(destination, S.healthPaused and "Health low · paused" or "Damage detected · returned", false)
+end
 function Engine.pulse(now, dt)
     local attack = S.attack
-    if not attack or not S.target or not S.selected[S.target.UserId] then
+    if not attack or not S.target or not Engine.isSelected(S.target) then
         Engine.finishTarget("Target deselected"); return
     end
     if attack.player.Parent ~= Players or attack.player.Character ~= attack.character or not attack.root.Parent or attack.hum.Health <= 0 then
@@ -440,32 +660,37 @@ function Engine.pulse(now, dt)
         Engine.finishTarget("Target out of range"); return
     end
     local elapsed = now - attack.started
-    if elapsed > .18 and ((attack.root.Position - attack.initial).Magnitude > 75 or targetVelocity.Magnitude > 240) then
+    if S.hum.Health < attack.initialHealth - .1 then Engine.healthChanged(S.hum.Health); return end
+    if targetPos.Y < attack.initial.Y - 16 then Engine.finishTarget("Target falling", true); return end
+    if elapsed > .15 and ((attack.root.Position - attack.initial).Magnitude > 55 or targetVelocity.Magnitude > 180) then
         Engine.finishTarget("Launch observed", true); return
     end
-    if elapsed > (S.high and 1.35 or 1.8) then Engine.finishTarget("No launch observed"); return end
+    if elapsed > (S.high and 1.6 or 2) then Engine.finishTarget("No launch observed"); return end
     attack.frame = attack.frame + 1
-    local angle = elapsed * (S.high and 48 or 33)
-    local lead = targetVelocity.Magnitude > 100 and targetVelocity.Unit * 2.5 or targetVelocity * math.min(dt, .025)
-    local radius = math.clamp((attack.contact.Size.X + S.root.Size.X) * .32, .65, 1.8)
-    local radial = Vector3.new(math.cos(angle) * radius, math.sin(angle * 1.7) * .35, math.sin(angle) * radius)
-    local center = targetPos + lead
+    local angle = elapsed * (S.high and 30 or 22)
+    local lead = targetVelocity.Magnitude > 75 and targetVelocity.Unit * 1.5 or targetVelocity * math.min(dt, .02)
+    local radius = math.clamp((attack.contact.Size.X + S.root.Size.X) * .25, .7, 1.35)
+    local radial = Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+    local center = targetPos + Vector3.new(lead.X, .65, lead.Z)
     local position = center + radial
     local direction = (center - position).Unit
-    local rotation = CFrame.Angles(math.rad((attack.frame % 4) * 90), angle, math.rad(30))
+    local rotation = CFrame.Angles(0, angle, 0)
     attack.pose = CFrame.new(position) * rotation
     for part in pairs(S.localParts) do
         if part.Parent then
             -- Include accessories added while a pulse is running in the restore ledger.
             if not S.restore.parts[part] then S.restore.parts[part] = {collide = part.CanCollide, physical = part.CustomPhysicalProperties} end
-            part.CanCollide = bodyCore(part)
+            -- One upright contact collider; head/limbs do not strike the map.
+            part.CanCollide = part == S.root
         end
     end
     S.hum.PlatformStand = true
+    Engine.guardScenery(position, now)
     S.character:PivotTo(attack.pose * attack.offset)
-    local power = S.high and 18000 or 7500
-    S.root.AssemblyLinearVelocity = direction * power + Vector3.new(0, power * .22, 0)
-    S.root.AssemblyAngularVelocity = Vector3.new(power * 1.15, power * .85, power * .6)
+    -- Rotational contact transfers the impulse without the old 18,000 studs/s
+    -- linear launch and vertical kick. No infinities, NaNs or global physics edits.
+    S.root.AssemblyLinearVelocity = direction * (S.high and 36 or 24)
+    S.root.AssemblyAngularVelocity = Vector3.new(0, S.high and 12000 or 6500, 0)
 end
 function Engine.emergency(now)
     if not S.root or not S.root.Parent or S.root.Anchored then return false end
@@ -502,15 +727,21 @@ function Engine.emergency(now)
     return false
 end
 function Engine.pre(dt)
+    NoFall.restore()
     local now = os.clock()
     local character, root, hum = avatar(LP)
     if not character or character ~= S.character or root ~= S.root then
-        if S.enabled or S.restore then Engine.stop("Waiting for character", false, true) end
+        if S.enabled or S.restore then Engine.characterLost("Waiting for character") end
         return
     end
     if hum.Health <= 0 or root.Anchored then
         if S.enabled or S.restore then Engine.stop("Character unavailable", false, true) end
         return
+    end
+    if S.enabled and hum.Health < hum.MaxHealth * .65 and not S.healthPaused then
+        S.healthPaused = true
+        S.pauseUntil = now + 3
+        Engine.beginRecovery((Engine.resolve(S.origin) and S.origin) or S.safe, "Health low · paused", false)
     end
     if Engine.emergency(now) then return end
     if S.mode == "recover" then
@@ -526,6 +757,10 @@ function Engine.pre(dt)
     elseif S.mode == "fling" then Engine.pulse(now, dt) end
     Engine.noclipStep()
     Engine.saveGround(now)
+    if S.resumeWanted and S.loop and now >= (S.resumeAt or 0) and Engine.resolve(S.safe) and hum.Health >= hum.MaxHealth * .80 then
+        S.resumeWanted = false
+        Engine.start()
+    end
     if now >= S.guardAt then S.guardAt = now + .2; Engine.updateGuards() end
 end
 function Engine.post()
@@ -533,13 +768,22 @@ function Engine.post()
         -- Pulse only across physics, never leave dangerous momentum for rendering
         -- or for the no-fall Heartbeat sampler.
         clearVelocity(S.root)
+        if S.attack.pose and ((S.root.Position - S.attack.pose.Position).Magnitude > 70 or S.root.Position.Y < S.attack.pose.Position.Y - 9) then
+            S.pauseUntil = os.clock() + 1
+            Engine.beginRecovery((Engine.resolve(S.origin) and S.origin) or S.safe, "Unstable contact · returned", false)
+            return
+        end
         if S.self and S.attack.pose and LP.Character == S.character then
             S.character:PivotTo(S.attack.pose * S.attack.offset)
         end
     end
 end
 function Engine.bind(character)
+    local resume = S.resumeWanted or (S.enabled and S.loop)
+    NoFall.restore()
     Engine.stop(nil, false, true)
+    S.resumeWanted = resume
+    S.resumeAt = os.clock() + .8
     disconnect(S.characterLinks)
     Engine.clearGuards()
     S.epoch = S.epoch + 1
@@ -553,9 +797,13 @@ function Engine.bind(character)
         if part.Name == "HumanoidRootPart" and part:IsA("BasePart") then S.root = part end
         if part:IsA("Humanoid") then
             S.hum = part
+            S.lastHealth = part.Health
+            link(part.HealthChanged, function(health) if part == S.hum then Engine.healthChanged(health) end end, S.characterLinks)
             link(part.Died, function()
-                Engine.stop("Respawning", false, true)
+                if part ~= S.hum then return end
+                Engine.characterLost("Respawning")
                 S.safe, S.origin = nil, nil
+                Engine.refresh()
             end, S.characterLinks)
         end
     end
@@ -567,7 +815,7 @@ function Engine.bind(character)
             pcall(function() part.CanCollide = S.clipped[part] end)
             S.clipped[part] = nil
         end
-        if part == S.root then Engine.stop("Character unavailable", false, true); S.root = nil; S.safe = nil end
+        if part == S.root then Engine.characterLost("Character unavailable"); S.root = nil; S.safe = nil end
     end, S.characterLinks)
     S.safeAt, S.guardAt = 0, 0
 end
@@ -578,10 +826,13 @@ end
 UI.gui = make("ScreenGui", PlayerGui, {Name = "FlingX", ResetOnSpawn = false,
     DisplayOrder = 74, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, IgnoreGuiInset = false})
 pcall(function() UI.gui.ScreenInsets = Enum.ScreenInsets.CoreUISafeInsets end)
-UI.gui:SetAttribute("Build", "charcoal-20261023")
+UI.gui:SetAttribute("Build", "charcoal-20261023-r2")
 UI.gui:SetAttribute("Palette", "Metallic Charcoal")
+S.nofall = NoFall.supported
+S.noFallLease = createNoFallLease(UI.gui, 50)
+NoFall.refresh()
 UI.screen = frame(UI.gui, "SafeArea", UDim2.fromScale(0, 0), UDim2.fromScale(1, 1), nil, 1, 1)
-UI.window = frame(UI.screen, "Window", UDim2.fromScale(.5, .5), UDim2.fromOffset(684, 456), nil, 1, 2)
+UI.window = frame(UI.screen, "Window", UDim2.fromScale(.5, .5), UDim2.fromOffset(604, 376), nil, 1, 2)
 UI.window.AnchorPoint = Vector2.new(.5, .5)
 UI.scale = make("UIScale", UI.window, {Scale = .96})
 UI.fade = make("NumberValue", UI.gui, {Name = "WindowFade", Value = 0})
@@ -595,13 +846,19 @@ local function surface(parent, name, position, size)
     corner(inside, 14); stroke(inside, C.silver, .94)
     local lip = frame(face, "ChromeLip", UDim2.fromOffset(18, 0), UDim2.new(1, -36, 0, 1), C.white, .44, 4)
     gradient(lip, {C.coal, C.silver, C.white, C.coal}, 0)
+    local reflection = frame(face, "SoftReflection", UDim2.fromOffset(3, 3), UDim2.new(1, -6, 1, -6), C.white, .97, 4)
+    corner(reflection, 13)
+    local sweep = gradient(reflection, {C.white, C.white}, 24)
+    sweep.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(.35, 1),
+        NumberSequenceKeypoint.new(.5, 0), NumberSequenceKeypoint.new(.65, 1), NumberSequenceKeypoint.new(1, 1)})
+    S.sheens[#S.sheens + 1] = sweep
     return face, rim
 end
 UI.dock = surface(UI.window, "Dock", UDim2.fromOffset(0, 0), UDim2.fromOffset(154, 426))
 UI.panel, UI.rim = surface(UI.window, "Panel", UDim2.fromOffset(164, 0), UDim2.fromOffset(520, 426))
-UI.brand = label(UI.dock, "Brand", "Fling", UDim2.fromOffset(17, 9), UDim2.fromOffset(94, 46), 33, C.white, Enum.Font.GrenzeGotisch)
+UI.brand = label(UI.dock, "Brand", "Fling", UDim2.fromOffset(14, 7), UDim2.fromOffset(81, 42), 30, C.white, Enum.Font.GrenzeGotisch)
 gradient(UI.brand, {C.white, C.silver, C.steel, C.white, C.silver}, 90)
-UI.brandX = label(UI.dock, "BrandX", "X", UDim2.fromOffset(111, 11), UDim2.fromOffset(32, 43), 34, C.white, Enum.Font.GrenzeGotisch)
+UI.brandX = label(UI.dock, "BrandX", "X", UDim2.fromOffset(94, 11), UDim2.fromOffset(26, 34), 22, C.white, Enum.Font.GothamBold)
 gradient(UI.brandX, {C.silver, C.white, C.steel}, 75)
 UI.dragDock = frame(UI.dock, "DragHandle", UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 62), nil, 1, 8)
 UI.dragDock.Active = true
@@ -653,9 +910,9 @@ local function button(parent, name, position, size, bag)
 end
 UI.nav = {}
 for i, data in ipairs({{"Targets", "target"}, {"Controls", "controls"}}) do
-    local nav = button(UI.dock, data[1], UDim2.fromOffset(10, 77 + (i - 1) * 55), UDim2.new(1, -20, 0, 46))
-    icon(nav, data[2], UDim2.fromOffset(12, 12), 22)
-    local text = label(nav, "Label", data[1], UDim2.fromOffset(44, 0), UDim2.new(1, -49, 1, 0), 14)
+    local nav = button(UI.dock, data[1], UDim2.fromOffset(9, 68 + (i - 1) * 49), UDim2.new(1, -18, 0, 42))
+    icon(nav, data[2], UDim2.fromOffset(9, 11), 20)
+    local text = label(nav, "Label", data[1], UDim2.fromOffset(36, 0), UDim2.new(1, -39, 1, 0), 12)
     local marker = frame(nav, "Selected", UDim2.fromOffset(0, 11), UDim2.fromOffset(2, 24), C.white, 0, 6)
     corner(marker, 2)
     UI.nav[data[1]] = {button = nav, text = text, marker = marker}
@@ -665,60 +922,64 @@ UI.minimize = button(UI.windowControls, "Minimize", UDim2.fromOffset(0, 0), UDim
 UI.close = button(UI.windowControls, "Close", UDim2.new(.5, 4, 0, 0), UDim2.new(.5, -4, 1, 0))
 icon(UI.minimize, "minimize", UDim2.new(.5, -10, .5, -10), 20)
 icon(UI.close, "close", UDim2.new(.5, -10, .5, -10), 20)
-UI.credit = label(UI.window, "Credit", "Made By Reyzn X", UDim2.new(0, 0, 1, -24), UDim2.new(1, 0, 0, 23), 12, C.silver)
+UI.credit = label(UI.window, "Credit", "Made By Reyzn X", UDim2.new(0, 0, 1, -23), UDim2.new(1, 0, 0, 23), 11, C.silver)
 UI.credit.TextXAlignment = Enum.TextXAlignment.Center
-UI.title = label(UI.panel, "Title", "Targets", UDim2.fromOffset(19, 14), UDim2.new(1, -130, 0, 26), 19, C.white, Enum.Font.GothamBold)
+UI.title = label(UI.panel, "Title", "Targets", UDim2.fromOffset(15, 10), UDim2.new(1, -130, 0, 26), 17, C.white, Enum.Font.GothamBold)
 UI.counter = label(UI.panel, "Count", "0 selected", UDim2.new(1, -118, 0, 16), UDim2.fromOffset(99, 22), 12, C.muted)
 UI.counter.TextXAlignment = Enum.TextXAlignment.Right
-UI.dragPanel = frame(UI.panel, "DragHandle", UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 48), nil, 1, 7)
+UI.dragPanel = frame(UI.panel, "DragHandle", UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 40), nil, 1, 7)
 UI.dragPanel.Active = true
-UI.targets = frame(UI.panel, "TargetsPage", UDim2.fromOffset(16, 52), UDim2.new(1, -32, 1, -166), nil, 1, 4)
-UI.controls = make("ScrollingFrame", UI.panel, {Name = "ControlsPage", Position = UDim2.fromOffset(16, 52),
-    Size = UDim2.new(1, -32, 1, -166), BackgroundTransparency = 1, ScrollBarThickness = 3,
+UI.targets = frame(UI.panel, "TargetsPage", UDim2.fromOffset(13, 44), UDim2.new(1, -26, 1, -139), nil, 1, 4)
+UI.controls = make("ScrollingFrame", UI.panel, {Name = "ControlsPage", Position = UDim2.fromOffset(13, 44),
+    Size = UDim2.new(1, -26, 1, -139), BackgroundTransparency = 1, ScrollBarThickness = 3,
     ScrollBarImageColor3 = C.steel, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
     ScrollingDirection = Enum.ScrollingDirection.Y, ElasticBehavior = Enum.ElasticBehavior.WhenScrollable, ZIndex = 4})
 make("UIListLayout", UI.controls, {Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder})
 make("UIPadding", UI.controls, {PaddingBottom = UDim.new(0, 3), PaddingRight = UDim.new(0, 5)})
-UI.search = make("TextBox", UI.targets, {Name = "Search", Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, -52, 0, 42),
+UI.search = make("TextBox", UI.targets, {Name = "Search", Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, -110, 0, 38),
     BackgroundColor3 = C.coal, PlaceholderText = "Search player", PlaceholderColor3 = C.muted,
     Text = "", ClearTextOnFocus = false, TextColor3 = C.white, Font = Enum.Font.GothamMedium,
-    TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5})
+    TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5})
 corner(UI.search, 10); stroke(UI.search, C.line, .2)
 make("UIPadding", UI.search, {PaddingLeft = UDim.new(0, 13), PaddingRight = UDim.new(0, 10)})
-UI.clear = button(UI.targets, "ClearSelection", UDim2.new(1, -44, 0, 0), UDim2.fromOffset(44, 42))
-icon(UI.clear, "close", UDim2.fromOffset(12, 11), 20)
-UI.list = make("ScrollingFrame", UI.targets, {Name = "PlayerList", Position = UDim2.fromOffset(0, 52),
-    Size = UDim2.new(1, 0, 1, -52), BackgroundTransparency = 1, ScrollBarThickness = 3,
+UI.all = button(UI.targets, "AllPlayers", UDim2.new(1, -103, 0, 0), UDim2.fromOffset(55, 38))
+UI.allText = label(UI.all, "Label", "All", UDim2.new(), UDim2.fromScale(1, 1), 12, C.muted, Enum.Font.GothamBold)
+UI.allText.TextXAlignment = Enum.TextXAlignment.Center
+UI.clear = button(UI.targets, "ClearSelection", UDim2.new(1, -41, 0, 0), UDim2.fromOffset(41, 38))
+icon(UI.clear, "close", UDim2.fromOffset(11, 9), 20)
+UI.list = make("ScrollingFrame", UI.targets, {Name = "PlayerList", Position = UDim2.fromOffset(0, 46),
+    Size = UDim2.new(1, 0, 1, -46), BackgroundTransparency = 1, ScrollBarThickness = 3,
     ScrollBarImageColor3 = C.steel, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
     ScrollingDirection = Enum.ScrollingDirection.Y, ElasticBehavior = Enum.ElasticBehavior.WhenScrollable, ZIndex = 4})
 make("UIListLayout", UI.list, {Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder})
 make("UIPadding", UI.list, {PaddingRight = UDim.new(0, 5), PaddingBottom = UDim.new(0, 3)})
 UI.empty = label(UI.targets, "Empty", "No other players", UDim2.fromOffset(0, 66), UDim2.new(1, 0, 0, 45), 14, C.muted)
 UI.empty.TextXAlignment = Enum.TextXAlignment.Center
-UI.activeDot = frame(UI.panel, "ActiveDot", UDim2.new(0, 19, 1, -97), UDim2.fromOffset(6, 6), C.steel, 0, 5)
+UI.activeDot = frame(UI.panel, "ActiveDot", UDim2.new(0, 16, 1, -81), UDim2.fromOffset(5, 5), C.steel, 0, 5)
 corner(UI.activeDot, 6)
-UI.status = label(UI.panel, "Status", "Ready", UDim2.new(0, 33, 1, -106), UDim2.new(1, -52, 0, 24), 12, C.muted)
-UI.action = button(UI.panel, "FlingToggle", UDim2.new(0, 16, 1, -72), UDim2.new(1, -32, 0, 54))
+UI.status = label(UI.panel, "Status", "Ready", UDim2.new(0, 29, 1, -89), UDim2.new(1, -42, 0, 22), 11, C.muted)
+UI.action = button(UI.panel, "FlingToggle", UDim2.new(0, 13, 1, -61), UDim2.new(1, -26, 0, 47))
 UI.action.BackgroundColor3 = Color3.new(1, 1, 1)
 UI.actionGradient = UI.action:FindFirstChildOfClass("UIGradient")
 UI.actionGradient.Color = ColorSequence.new(C.steel, C.dark)
-UI.actionText = label(UI.action, "Label", "FLING  OFF", UDim2.fromOffset(18, 0), UDim2.new(1, -70, 1, 0), 16, C.white, Enum.Font.GothamBold)
-UI.actionMark = label(UI.action, "ActionMark", "→", UDim2.new(1, -48, 0, 0), UDim2.fromOffset(30, 54), 24)
+UI.actionText = label(UI.action, "Label", "FLING  OFF", UDim2.fromOffset(15, 0), UDim2.new(1, -65, 1, 0), 14, C.white, Enum.Font.GothamBold)
+UI.actionMark = label(UI.action, "ActionMark", "→", UDim2.new(1, -44, 0, 0), UDim2.fromOffset(30, 47), 22)
 UI.actionMark.TextXAlignment = Enum.TextXAlignment.Center
 
 UI.switches = {}
 local switchDefinitions = {
-    {"loop", "Loop Fling", "loop"}, {"high", "High Power", "bolt"},
+    {"loop", "Loop Fling", "loop"}, {"all", "All Players", "target"},
+    {"nofall", "No Fall Damage", "shield"}, {"high", "High Power", "bolt"},
     {"anti", "Anti-Fling", "shield"}, {"self", "Self Protection", "shield"},
     {"void", "Void Protection", "void"}, {"noclip", "Noclip", "ghost"},
     {"back", "Return Position", "back"},
 }
 for i, data in ipairs(switchDefinitions) do
     local key = data[1]
-    local row = button(UI.controls, key, UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 50))
+    local row = button(UI.controls, key, UDim2.fromOffset(0, 0), UDim2.new(1, 0, 0, 44))
     row.LayoutOrder = i
-    icon(row, data[3], UDim2.fromOffset(12, 14), 22)
-    local text = label(row, "Label", data[2], UDim2.fromOffset(45, 0), UDim2.new(1, -129, 1, 0), 14)
+    icon(row, data[3], UDim2.fromOffset(11, 12), 20)
+    local text = label(row, "Label", data[2], UDim2.fromOffset(41, 0), UDim2.new(1, -120, 1, 0), 13)
     local track = frame(row, "Track", UDim2.new(1, -69, .5, -13), UDim2.fromOffset(56, 26), C.coal, 0, 6)
     corner(track, 13); stroke(track, C.line, .25)
     local knob = frame(track, "Knob", UDim2.fromOffset(3, 3), UDim2.fromOffset(20, 20), C.muted, 0, 7)
@@ -737,8 +998,14 @@ for i, data in ipairs(switchDefinitions) do
     end
     UI.switches[key] = {refresh = refresh, text = text}
     link(row.Activated, function()
+        if key == "nofall" then
+            if not NoFall.supported then status("No Fall · Natural Disaster only", 3); return end
+            if S.enabled then status("No Fall stays ON during fling", 2); return end
+        end
         S[key] = not S[key]
         refresh(false)
+        if key == "nofall" then NoFall.refresh() end
+        if key == "all" then UI.refreshSelection() end
         if key == "anti" then Engine.updateGuards() end
         if key == "noclip" and not S.noclip then Engine.restoreNoclip() end
     end)
@@ -778,7 +1045,7 @@ function UI.refreshSelection()
     local count, visible = 0, 0
     local query = string.lower(UI.search.Text)
     for player, row in pairs(S.rows) do
-        local chosen = S.selected[player.UserId] == true
+        local chosen = Engine.isSelected(player)
         if chosen then count = count + 1 end
         row.check.Text = chosen and "✓" or "+"
         row.check.TextColor3 = chosen and C.white or C.muted
@@ -788,33 +1055,40 @@ function UI.refreshSelection()
             or string.find(string.lower(player.DisplayName), query, 1, true) ~= nil
         if row.button.Visible then visible = visible + 1 end
     end
-    UI.counter.Text = tostring(count) .. " selected"
+    UI.counter.Text = S.all and ("All · " .. count) or (tostring(count) .. " selected")
+    UI.allText.TextColor3 = S.all and C.white or C.muted
+    UI.all:FindFirstChildOfClass("UIStroke").Color = S.all and C.silver or C.line
+    if UI.switches.all then UI.switches.all.refresh(true) end
     UI.empty.Visible = visible == 0
     UI.empty.Text = next(S.rows) and "No matches" or "No other players"
 end
 function UI.addPlayer(player)
     if player == LP or S.rows[player] then return end
     local row = {links = {}}
-    row.button = button(UI.list, "Player_" .. player.UserId, UDim2.new(), UDim2.new(1, 0, 0, 58), row.links)
+    row.button = button(UI.list, "Player_" .. player.UserId, UDim2.new(), UDim2.new(1, 0, 0, 50), row.links)
     row.button.LayoutOrder = player.UserId % 1000000000
     row.edge = row.button:FindFirstChildOfClass("UIStroke")
-    local badge = frame(row.button, "Avatar", UDim2.fromOffset(9, 9), UDim2.fromOffset(40, 40), C.coal, 0, 6)
+    local badge = frame(row.button, "Avatar", UDim2.fromOffset(8, 8), UDim2.fromOffset(34, 34), C.coal, 0, 6)
     corner(badge, 10)
     local fallback = label(badge, "Initial", string.sub(player.DisplayName, 1, 1), UDim2.new(), UDim2.fromScale(1, 1), 20, C.silver, Enum.Font.GrenzeGotisch)
     fallback.TextXAlignment = Enum.TextXAlignment.Center
     row.image = make("ImageLabel", badge, {Name = "Headshot", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
         Image = "rbxthumb://type=AvatarHeadShot&id=" .. player.UserId .. "&w=150&h=150", ZIndex = 7})
     corner(row.image, 10)
-    row.name = label(row.button, "DisplayName", player.DisplayName, UDim2.fromOffset(60, 7), UDim2.new(1, -109, 0, 24), 14)
-    row.username = label(row.button, "Username", "@" .. player.Name, UDim2.fromOffset(60, 31), UDim2.new(1, -109, 0, 18), 11, C.muted)
-    row.check = label(row.button, "Check", "+", UDim2.new(1, -40, 0, 0), UDim2.fromOffset(30, 58), 23, C.muted)
+    row.name = label(row.button, "DisplayName", player.DisplayName, UDim2.fromOffset(51, 5), UDim2.new(1, -96, 0, 22), 13)
+    row.username = label(row.button, "Username", "@" .. player.Name, UDim2.fromOffset(51, 27), UDim2.new(1, -96, 0, 17), 10, C.muted)
+    row.check = label(row.button, "Check", "+", UDim2.new(1, -37, 0, 0), UDim2.fromOffset(28, 50), 21, C.muted)
     row.check.TextXAlignment = Enum.TextXAlignment.Center
     S.rows[player] = row
     fadeRegister(row.button)
     link(row.button.Activated, function()
+        if S.all then
+            S.all = false
+            for _, other in ipairs(Players:GetPlayers()) do if other ~= LP then S.selected[other.UserId] = true end end
+        end
         S.selected[player.UserId] = not S.selected[player.UserId] or nil
         UI.refreshSelection()
-        if S.target == player and not S.selected[player.UserId] then Engine.finishTarget("Target deselected") end
+        if S.target == player and not Engine.isSelected(player) then Engine.finishTarget("Target deselected") end
     end, row.links)
     link(player:GetPropertyChangedSignal("DisplayName"), function()
         row.name.Text = player.DisplayName
@@ -834,6 +1108,7 @@ function UI.removePlayer(player)
         row.button:Destroy(); S.rows[player] = nil
     end
     Engine.clearGuards(player)
+    S.avoidUntil[player.UserId] = nil
     if S.target == player then Engine.finishTarget("Player left") end
     UI.refreshSelection()
     applyFade()
@@ -851,16 +1126,18 @@ end
 for name, nav in pairs(UI.nav) do link(nav.button.Activated, function() UI.selectPage(name) end) end
 link(UI.search:GetPropertyChangedSignal("Text"), UI.refreshSelection)
 link(UI.clear.Activated, function()
+    S.all = false
     table.clear(S.selected)
     UI.refreshSelection()
     if S.enabled then Engine.stop("Selection cleared") end
 end)
+link(UI.all.Activated, function() S.all = not S.all; UI.refreshSelection() end)
 link(UI.action.Activated, Engine.start)
 
-UI.launcher = button(UI.screen, "Launcher", UDim2.fromOffset(22, 110), UDim2.fromOffset(62, 62))
+UI.launcher = button(UI.screen, "Launcher", UDim2.fromOffset(26, 110), UDim2.fromOffset(56, 56))
 UI.launcher.Visible = false
 corner(UI.launcher, 17)
-UI.launcherText = label(UI.launcher, "Logo", "FX", UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1), 31, C.white, Enum.Font.GrenzeGotisch)
+UI.launcherText = label(UI.launcher, "Logo", "FX", UDim2.fromOffset(0, 0), UDim2.fromScale(1, 1), 23, C.white, Enum.Font.GothamBold)
 UI.launcherText.TextXAlignment = Enum.TextXAlignment.Center
 gradient(UI.launcherText, {C.white, C.steel, C.white}, 85)
 UI.miniDot = frame(UI.launcher, "Active", UDim2.new(1, -11, 0, 7), UDim2.fromOffset(5, 5), C.white, 0, 7)
@@ -876,72 +1153,101 @@ local FIRE = {
 local function fireImage(parent, name, core)
     local image = make("ImageLabel", parent, {Name = name, BackgroundTransparency = 1, Image = FIRE.image,
         ImageColor3 = C.white, ImageTransparency = 1, AnchorPoint = Vector2.new(.5, 1),
-        ScaleType = Enum.ScaleType.Stretch, ZIndex = 1, Active = false})
-    local wash = gradient(image, core and {C.silver, C.white, C.silver, C.steel} or {C.coal, C.steel, C.silver, C.dark}, 90)
-    wash.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, .65), NumberSequenceKeypoint.new(.28, .12),
-        NumberSequenceKeypoint.new(.72, .03), NumberSequenceKeypoint.new(1, 1)})
+        ScaleType = Enum.ScaleType.Stretch, ZIndex = core and 2 or 1, Active = false})
+    local wash = gradient(image, core and {C.silver, C.white, C.white, C.silver} or {C.steel, C.silver, C.white, C.silver}, 90)
+    -- A rooted flame must retain its bright base. The old bottom alpha=1 made
+    -- every sprite float separately above the frame like a row of small icons.
+    wash.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, .55), NumberSequenceKeypoint.new(.24, .12),
+        NumberSequenceKeypoint.new(.68, 0), NumberSequenceKeypoint.new(1, .04)})
     FIRE.images[#FIRE.images + 1] = image
     return image
 end
 local function createFire(parent, name, miniature)
-    local host = frame(parent, name, UDim2.new(), UDim2.fromScale(1, 1), nil, 1, 1)
+    local host = frame(parent, name, UDim2.new(), miniature and UDim2.fromOffset(56, 56) or UDim2.new(1, 0, 1, -26), nil, 1, miniature and 4 or 1)
     host.Active = false
-    local effect = {host = host, roots = {}, embers = {}, miniature = miniature}
-    local counts = miniature and {4, 2, 3, 2} or {9, 5, 8, 5}
+    local effect = {host = host, roots = {}, embers = {}, fields = {}, miniature = miniature}
+    -- Two layers per root instead of three. More closely packed roots produce a
+    -- continuous perimeter, while the pool stays fixed throughout the session.
+    local counts = miniature and {9, 5, 8, 5} or {32, 12, 28, 12}
     for side, count in ipairs(counts) do
         for i = 1, count do
-            local seed = side * 4.73 + i * 1.71
-            local root = {side = side, fraction = (i - .5) / count, seed = seed, count = count,
-                veil = fireImage(host, "CharcoalVeil", false), body = fireImage(host, "SilverFlame", false),
-                core = fireImage(host, "HotCore", true)}
-            effect.roots[#effect.roots + 1] = root
+            local seed = side * 19.73 + i * 2.713
+            effect.roots[#effect.roots + 1] = {
+                side = side, fraction = (i - .5) / count, seed = seed, count = count,
+                body = fireImage(host, "FlowingFlame", false), core = fireImage(host, "HotFilament", true),
+                height = .78 + (math.sin(seed * 9.17) * .5 + .5) * .44,
+            }
         end
     end
-    for i = 1, miniature and 4 or 12 do
-        local ember = frame(host, "Ember", UDim2.new(), UDim2.fromOffset(1.5, 2.5), C.silver, 1, 1)
+    for side = 1, 4 do
+        local field = frame(host, "EdgeRadiance", UDim2.new(), UDim2.new(), C.white, 1, 1)
+        local wash = gradient(field, {C.steel, C.silver, C.white}, (side == 1 or side == 3) and 90 or 0)
+        wash.Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 1), NumberSequenceKeypoint.new(.25, .93),
+            NumberSequenceKeypoint.new(.5, .40), NumberSequenceKeypoint.new(.75, .93), NumberSequenceKeypoint.new(1, 1)})
+        corner(field, 14)
+        effect.fields[side] = field
+    end
+    for i = 1, miniature and 9 or 20 do
+        local ember = frame(host, "RisingEmber", UDim2.new(), UDim2.fromOffset(i % 3 == 0 and 1.8 or 1.1, 2.5), C.white, 1, 2)
         corner(ember, 2)
-        effect.embers[#effect.embers + 1] = {node = ember, seed = i * 1.93}
+        effect.embers[#effect.embers + 1] = {node = ember, seed = i * 1.937}
     end
     S.fire[#S.fire + 1] = effect
     return effect
 end
-UI.fire = createFire(UI.window, "SilverFire", false)
-UI.miniFire = createFire(UI.launcher, "SilverFire", true)
+UI.fire = createFire(UI.window, "DenseSilverFire", false)
+-- A sibling behind the launcher keeps flames around the badge instead of
+-- drawing over the FX lettering, which was obscured in the original version.
+UI.miniFire = createFire(UI.screen, "LauncherSilverFire", true)
+UI.miniFire.host.Visible = false
 local function drawFire(effect, time, opacity)
     local size = effect.host.AbsoluteSize
     if size.X < 2 or size.Y < 2 then return end
-    local w, h = size.X / (effect.miniature and 1 or UI.scale.Scale), size.Y / (effect.miniature and 1 or UI.scale.Scale)
+    local w = size.X / (effect.miniature and 1 or UI.scale.Scale)
+    local h = size.Y / (effect.miniature and 1 or UI.scale.Scale)
     local small = effect.miniature
     for _, root in ipairs(effect.roots) do
         local side, seed, fraction = root.side, root.seed, root.fraction
-        local x = (side == 1 or side == 3) and (12 + (w - 24) * fraction) or (side == 2 and w - 1 or 1)
-        local y = (side == 2 or side == 4) and (16 + (h - 32) * fraction) or (side == 1 and 4 or h - 17)
-        local width = small and 20 or ((side == 1 or side == 3) and math.clamp(w / root.count * 1.35, 28, 72) or 32)
-        local height = (small and 38 or (side == 1 and 62 or 53)) * (1 + math.noise(seed, time * 1.7) * .28)
-        local bend = math.noise(seed + 19, time * 1.5) * (small and 6 or 13)
-        local age = (time * (.62 + (seed % .18)) + seed) % 1
-        local envelope = math.sin(age * math.pi) ^ 2
-        local other = (age + .5) % 1
-        root.veil.Position = UDim2.fromOffset(x + bend * 1.3, y - age * 8)
-        root.veil.Size = UDim2.fromOffset(width * (1.2 - age * .3), height * (1 + age * .35))
-        root.veil.Rotation = bend * .9
-        root.veil.ImageTransparency = 1 - envelope * .44 * opacity
-        root.body.Position = UDim2.fromOffset(x + bend, y - other * 5)
-        root.body.Size = UDim2.fromOffset(width * (.85 - other * .17), height * (.82 + other * .37))
-        root.body.Rotation = -bend * .7
-        root.body.ImageTransparency = 1 - math.sin(other * math.pi) ^ 2 * .65 * opacity
-        root.core.Position = UDim2.fromOffset(x + bend * .3, y)
-        root.core.Size = UDim2.fromOffset(width * .43, height * .63)
-        root.core.Rotation = bend * .25
-        root.core.ImageTransparency = 1 - (.20 + .08 * math.sin(time * 3 + seed) ^ 2) * opacity
+        local horizontal = side == 1 or side == 3
+        local x = horizontal and (7 + (w - 14) * fraction) or (side == 2 and w - 2 or 2)
+        local y = horizontal and (side == 1 and (small and 9 or 13) or h + 6) or (12 + (h - 20) * fraction)
+        local spacing = horizontal and w / root.count or h / root.count
+        local width = small and 22 or (horizontal and math.clamp(spacing * 2.8, 38, 64) or 36)
+        local turbulence = math.noise(seed, time * 2.1)
+        local height = (small and 37 or (side == 1 and 65 or side == 3 and 46 or 55)) * root.height * (1 + turbulence * .22)
+        local bend = math.noise(seed + 37, time * 1.8) * (small and 6 or 10)
+        local age = (time * (.70 + seed % .21) + seed) % 1
+        local heat = .44 + .40 * math.sin(age * math.pi) ^ 2
+        -- The base does not lift off the edge; height, width and bend carry the
+        -- upward motion. Independent phases remove the synchronized stamp look.
+        root.body.Position = UDim2.fromOffset(x + bend * .55, y)
+        root.body.Size = UDim2.fromOffset(width * (.90 + .12 * math.sin(time * 2.4 + seed)), height * (.85 + age * .28))
+        root.body.Rotation = bend * .65
+        root.body.ImageTransparency = 1 - heat * .78 * opacity
+        root.core.Position = UDim2.fromOffset(x - bend * .25, y + 1)
+        root.core.Size = UDim2.fromOffset(width * (.34 + .12 * math.sin(time * 1.8 + seed) ^ 2), height * (.59 + .21 * math.sin(time * 2 + seed) ^ 2))
+        root.core.Rotation = -bend * .48
+        root.core.ImageTransparency = 1 - (.30 + .24 * math.sin(time * 3.1 + seed) ^ 2) * opacity
+    end
+    for side, field in ipairs(effect.fields) do
+        local horizontal = side == 1 or side == 3
+        field.Size = horizontal and UDim2.fromOffset(w - 14, 24) or UDim2.fromOffset(24, h - 14)
+        if side == 1 then field.Position = UDim2.fromOffset(7, -12)
+        elseif side == 2 then field.Position = UDim2.fromOffset(w - 12, 7)
+        elseif side == 3 then field.Position = UDim2.fromOffset(7, h - 12)
+        else field.Position = UDim2.fromOffset(-12, 7) end
+        field.BackgroundTransparency = 1 - (.24 + .05 * math.sin(time * 1.7 + side) ^ 2) * opacity
     end
     for _, ember in ipairs(effect.embers) do
-        local age = (time * .32 + ember.seed) % 1
         local seed = ember.seed
-        local x = (seed % 1) * w + math.sin(seed + age * 4) * 7
-        local y = (math.floor(seed) % 2 == 0 and h - 18 or 0) - age * (small and 40 or 70)
+        local age = (time * (.35 + seed % .13) + seed) % 1
+        local side = math.floor(seed) % 3
+        local x = side == 0 and ((seed % 1) * w) or (side == 1 and -5 or w + 5)
+        local y = side == 0 and 5 or (seed % 1) * h
+        x = x + math.sin(seed + age * 4) * (small and 4 or 7) * age
+        y = y - age * (small and 42 or 72)
         ember.node.Position = UDim2.fromOffset(x, y)
-        ember.node.BackgroundTransparency = 1 - math.sin(age * math.pi) ^ 2 * .6 * opacity
+        ember.node.BackgroundTransparency = 1 - math.sin(age * math.pi) ^ 2 * .72 * opacity
     end
 end
 
@@ -970,8 +1276,8 @@ local function loadFire()
     if not ok or type(uri) ~= "string" or uri == "" then UI.gui:SetAttribute("FireTexture", "built-in fallback"); return end
     for _, image in ipairs(FIRE.images) do
         image.Image = uri
-        image.ImageRectOffset = Vector2.new(110, 0)
-        image.ImageRectSize = Vector2.new(1040, 1254)
+        image.ImageRectOffset = Vector2.new(218, 30)
+        image.ImageRectSize = Vector2.new(850, 1188)
     end
     pcall(function() ContentProvider:PreloadAsync({FIRE.images[1]}) end)
     if not S.alive then return end
@@ -998,25 +1304,25 @@ function UI.resize(initial)
     local available = UI.screen.AbsoluteSize
     if available.X < 100 or available.Y < 100 then return end
     local narrow = available.X < 600 and available.Y >= 440
-    local width = math.min(710, available.X - 32)
-    local height = math.min(narrow and 620 or 456, available.Y - 36)
-    local dockWidth = narrow and width or 154
-    local dockHeight = narrow and 106 or height - 28
-    local panelY = narrow and 116 or 0
-    local panelX = narrow and 0 or 164
+    local width = math.min(604, available.X - 36)
+    local height = math.min(narrow and 516 or 376, available.Y - 48)
+    local dockWidth = narrow and width or 128
+    local dockHeight = narrow and 99 or height - 26
+    local panelY = narrow and 109 or 0
+    local panelX = narrow and 0 or 138
     UI.window.Size = UDim2.fromOffset(width, height)
     UI.dock.Size = UDim2.fromOffset(dockWidth, dockHeight)
     UI.panel.Position = UDim2.fromOffset(panelX, panelY)
-    UI.panel.Size = UDim2.fromOffset(width - panelX, height - 28 - panelY)
-    UI.brand.Position = UDim2.fromOffset(17, 6)
-    UI.brandX.Position = UDim2.fromOffset(111, 8)
+    UI.panel.Size = UDim2.fromOffset(width - panelX, height - 26 - panelY)
+    UI.brand.Position = UDim2.fromOffset(14, 4)
+    UI.brandX.Position = UDim2.fromOffset(94, 9)
     UI.dragDock.Size = narrow and UDim2.new(1, -112, 0, 55) or UDim2.new(1, 0, 0, 62)
     UI.dockDivider.Visible = not narrow
     for i, name in ipairs({"Targets", "Controls"}) do
         local nav = UI.nav[name].button
         nav.Position = narrow and UDim2.new((i - 1) * .5, i == 1 and 10 or 4, 0, 56)
-            or UDim2.fromOffset(10, 77 + (i - 1) * 55)
-        nav.Size = narrow and UDim2.new(.5, -14, 0, 40) or UDim2.new(1, -20, 0, 46)
+            or UDim2.fromOffset(9, 68 + (i - 1) * 49)
+        nav.Size = narrow and UDim2.new(.5, -14, 0, 40) or UDim2.new(1, -18, 0, 42)
     end
     UI.windowControls.Position = narrow and UDim2.new(1, -107, 0, 8) or UDim2.new(0, 10, 1, -54)
     UI.windowControls.Size = narrow and UDim2.fromOffset(97, 40) or UDim2.new(1, -20, 0, 44)
@@ -1024,7 +1330,7 @@ function UI.resize(initial)
     UI.clampWindow()
     UI.launcher.Position = UDim2.fromOffset(math.clamp(UI.launcher.Position.X.Offset, 8, math.max(8, available.X - 70)),
         math.clamp(UI.launcher.Position.Y.Offset, 8, math.max(8, available.Y - 70)))
-    for _, record in pairs(UI.switches) do record.text.TextSize = width < 350 and 12 or 14 end
+    for _, record in pairs(UI.switches) do record.text.TextSize = width < 350 and 12 or 13 end
 end
 function UI.minimizeWindow(value)
     if S.closing then return end
@@ -1032,6 +1338,8 @@ function UI.minimizeWindow(value)
     S.fadeVersion = S.fadeVersion + 1
     local version = S.fadeVersion
     UI.launcher.Visible = value
+    UI.miniFire.host.Position = UI.launcher.Position
+    UI.miniFire.host.Visible = value
     if not value then UI.window.Visible = true; UI.resize(false) end
     animate(UI.fade, .22, {Value = value and 0 or 1})
     animate(UI.scale, .26, {Scale = value and .96 or 1})
@@ -1096,6 +1404,7 @@ local function cleanup()
     if not S.alive then return end
     -- Stop physics synchronously before disconnecting anything; re-execution
     -- cannot leave the previous instance spinning or holding a camera subject.
+    pcall(function() S.noFallLease:destroy() end)
     pcall(function() Engine.stop(nil, false, true) end)
     pcall(Engine.releasePhysics)
     pcall(Engine.restoreNoclip)
@@ -1138,15 +1447,25 @@ link(RunService.PostSimulation, function()
     local ok, message = xpcall(Engine.post, debug.traceback)
     if not ok then physicsError(message) end
 end)
+link(RunService.RenderStepped, NoFall.restore)
 link(RunService.Heartbeat, function(dt)
+    NoFall.pulse()
     S.clock = S.clock + dt
     S.budget = S.budget + dt
     local interval = dt > .05 and 1 / 20 or 1 / 30
     if not S.focused or S.budget < interval then return end
     S.budget = S.budget % interval
-    if UI.window.Visible then drawFire(UI.fire, S.clock, UI.fade.Value) end
-    if UI.launcher.Visible then drawFire(UI.miniFire, S.clock, 1) end
-    UI.miniDot.Visible = S.enabled
+    if UI.window.Visible then
+        drawFire(UI.fire, S.clock, UI.fade.Value)
+        for i, sweep in ipairs(S.sheens) do
+            sweep.Offset = Vector2.new(-1.25 + 2.5 * math.min(1, ((S.clock + i * .4) % 9) / 2), 0)
+        end
+    end
+    if UI.launcher.Visible then
+        UI.miniFire.host.Position = UI.launcher.Position
+        drawFire(UI.miniFire, S.clock, 1)
+    end
+    UI.miniDot.Visible = S.enabled or S.resumeWanted
     if not S.enabled and S.mode == "idle" and S.statusUntil > 0 and os.clock() > S.statusUntil then
         S.statusUntil = 0; status("Ready")
     end
