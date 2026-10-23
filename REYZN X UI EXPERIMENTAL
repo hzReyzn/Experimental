@@ -490,31 +490,6 @@ function NoFallDamage:pulse()
     if (humanoid and humanoid.Health<=0) or (type(bottom)=="number" and root.Position.Y<=bottom+4) then return end
     self.lease:pulse(root)
 end
--- Mitigate impact velocity on the final physics step before landing.
--- Normal free-fall motion is left untouched until ground is within reach.
-function NoFallDamage:protectLanding(dt)
-    self:restore()
-    local character,root=self.character,self.root
-    if not character or character~=player.Character or not root or root.Parent~=character or root.Anchored then return end
-    local humanoid=character:FindFirstChildOfClass("Humanoid")
-    if not humanoid or humanoid.Health<=0 or humanoid.SeatPart then return end
-    local velocity=root.AssemblyLinearVelocity
-    if velocity.Y>=-32 then return end
-    if not self.landingRay then
-        local ray=RaycastParams.new()
-        ray.FilterType=Enum.RaycastFilterType.Exclude
-        ray.IgnoreWater=true
-        ray.RespectCanCollide=true
-        self.landingRay=ray
-    end
-    self.landingRay.FilterDescendantsInstances={character}
-    local clearance=humanoid.HipHeight+root.Size.Y*.5
-    local reach=clearance+math.max(3,-velocity.Y*math.clamp(dt or 1/60,1/120,1/20)+2)
-    local hit=workspace:Raycast(root.Position,Vector3.new(0,-reach,0),self.landingRay)
-    if hit and hit.Normal.Y>.6 then
-        self.lease:writeVelocity(root,Vector3.new(velocity.X,-9,velocity.Z))
-    end
-end
 function NoFallDamage:setEnabled(enabled)
     if self.destroyed then return false end
     if enabled and not self.supported then
@@ -540,7 +515,7 @@ function NoFallDamage:setEnabled(enabled)
     self:listen(self.links,RunService.Heartbeat,function() self:pulse() end)
     self:listen(self.links,RunService.RenderStepped,function() self:restore() end)
     -- Restore before physics as well if the renderer pauses or skips a frame.
-    self:listen(self.links,RunService.PreSimulation,function(dt) self:protectLanding(dt) end)
+    self:listen(self.links,RunService.PreSimulation,function() self:restore() end)
     return true
 end
 function NoFallDamage:destroy()
@@ -3322,10 +3297,10 @@ local function nDSController(controller,name)
 end
 
 local function createAntiVoid(context)
-    -- Remember only positions with stable, collidable ground directly below.
-    -- Never use hard-coded island/tower teleport coordinates.
-    local safePositions={}
-    local HISTORY_LIMIT=24
+    local locations={
+        {name="Island",pos=Vector3.new(-127.3518295288086,47.61382293701172,8.868382453918457)},
+        {name="Tower",pos=Vector3.new(-236.30526733398438,194.6138153076172,337.5936584472656)}
+    }
     local elapsed=0
     local lastRescue=-math.huge
     local spawnAt=os.clock()
@@ -3333,22 +3308,6 @@ local function createAntiVoid(context)
     rp.FilterType=Enum.RaycastFilterType.Exclude
     rp.IgnoreWater=true
     rp.RespectCanCollide=true
-
-    local function groundedPosition(char,root,hum,position)
-        rp.FilterDescendantsInstances={char}
-        local ray=workspace:Raycast(position+Vector3.new(0,3,0),Vector3.new(0,-16,0),rp)
-        if not ray or ray.Normal.Y<.7 then return nil end
-        local ground=ray.Instance
-        if ground~=workspace.Terrain and (not ground:IsA("BasePart") or not ground.Anchored) then
-            return nil
-        end
-        local y=ray.Position.Y+hum.HipHeight+root.Size.Y*.5+.5
-        if y<=workspace.FallenPartsDestroyHeight+15 or math.abs(y-position.Y)>4 then
-            return nil
-        end
-        return Vector3.new(position.X,y,position.Z)
-    end
-
     local controller=context.newFeature(context.player,context.runService,{
         start=function()
             local env=(type(getgenv)=="function" and getgenv()) or _G
@@ -3360,7 +3319,6 @@ local function createAntiVoid(context)
         reset=function()
             elapsed=0
             spawnAt=os.clock()
-            table.clear(safePositions) -- Don't reuse another character's checkpoint.
         end,
         step=function(self,dt)
             elapsed+=dt
@@ -3369,42 +3327,26 @@ local function createAntiVoid(context)
             local char,root,hum=self.character,self.root,self.humanoid
             if not root or root.Anchored or hum.SeatPart then return end
             local now=os.clock()
-
-            -- Update the last safe location while standing/walking near solid ground.
-            -- A fall through empty space cannot replace the saved checkpoint.
-            if root.AssemblyLinearVelocity.Y>=-8 then
-                local safe=groundedPosition(char,root,hum,root.Position)
-                if safe then
-                    local previous=safePositions[#safePositions]
-                    if previous and (previous.pos-safe).Magnitude<3 then
-                        previous.pos=safe
-                    else
-                        safePositions[#safePositions+1]={pos=safe}
-                        if #safePositions>HISTORY_LIMIT then table.remove(safePositions,1) end
-                    end
-                end
-            end
-
             if now-spawnAt<2 or now-lastRescue<2 then return end
             if root.Position.Y>math.max(18,workspace.FallenPartsDestroyHeight+35) then return end
             if root.AssemblyLinearVelocity.Y>-12 then return end
             rp.FilterDescendantsInstances={char}
             if workspace:Raycast(root.Position,Vector3.new(0,-400,0),rp) then return end
-
-            -- Use the newest checkpoint whose floor still exists. An older one is
-            -- used only if a disaster destroyed the most recent safe platform.
-            local destination
-            for i=#safePositions,1,-1 do
-                destination=groundedPosition(char,root,hum,safePositions[i].pos)
-                if destination then break end
+            local choice,shortest
+            for _,destination in ipairs(locations) do
+                local offset=destination.pos-root.Position
+                local length=offset.X*offset.X+offset.Z*offset.Z
+                if not shortest or length<shortest then
+                    shortest=length;choice=destination
+                end
             end
-            if not destination then return end
+            if not choice then return end
             lastRescue=now
             context.motion:writeVelocity(root,Vector3.zero)
             root.AssemblyAngularVelocity=Vector3.zero
-            root.CFrame=CFrame.new(destination)*root.CFrame.Rotation
+            root.CFrame=CFrame.new(choice.pos)*root.CFrame.Rotation
             context.motion:markCarry(root)
-            warn("Reyzn X Anti-Void: returned to last safe position")
+            warn("Reyzn X Anti-Void: rescue to "..choice.name)
         end
     })
     return nDSController(controller,"Anti-Void")
