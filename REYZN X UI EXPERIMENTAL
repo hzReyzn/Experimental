@@ -490,6 +490,31 @@ function NoFallDamage:pulse()
     if (humanoid and humanoid.Health<=0) or (type(bottom)=="number" and root.Position.Y<=bottom+4) then return end
     self.lease:pulse(root)
 end
+-- Mitigate impact velocity on the final physics step before landing.
+-- Normal free-fall motion is left untouched until ground is within reach.
+function NoFallDamage:protectLanding(dt)
+    self:restore()
+    local character,root=self.character,self.root
+    if not character or character~=player.Character or not root or root.Parent~=character or root.Anchored then return end
+    local humanoid=character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health<=0 or humanoid.SeatPart then return end
+    local velocity=root.AssemblyLinearVelocity
+    if velocity.Y>=-32 then return end
+    if not self.landingRay then
+        local ray=RaycastParams.new()
+        ray.FilterType=Enum.RaycastFilterType.Exclude
+        ray.IgnoreWater=true
+        ray.RespectCanCollide=true
+        self.landingRay=ray
+    end
+    self.landingRay.FilterDescendantsInstances={character}
+    local clearance=humanoid.HipHeight+root.Size.Y*.5
+    local reach=clearance+math.max(3,-velocity.Y*math.clamp(dt or 1/60,1/120,1/20)+2)
+    local hit=workspace:Raycast(root.Position,Vector3.new(0,-reach,0),self.landingRay)
+    if hit and hit.Normal.Y>.6 then
+        self.lease:writeVelocity(root,Vector3.new(velocity.X,-9,velocity.Z))
+    end
+end
 function NoFallDamage:setEnabled(enabled)
     if self.destroyed then return false end
     if enabled and not self.supported then
@@ -515,7 +540,7 @@ function NoFallDamage:setEnabled(enabled)
     self:listen(self.links,RunService.Heartbeat,function() self:pulse() end)
     self:listen(self.links,RunService.RenderStepped,function() self:restore() end)
     -- Restore before physics as well if the renderer pauses or skips a frame.
-    self:listen(self.links,RunService.PreSimulation,function() self:restore() end)
+    self:listen(self.links,RunService.PreSimulation,function(dt) self:protectLanding(dt) end)
     return true
 end
 function NoFallDamage:destroy()
@@ -3351,7 +3376,7 @@ local function createAntiVoid(context)
                 local safe=groundedPosition(char,root,hum,root.Position)
                 if safe then
                     local previous=safePositions[#safePositions]
-                    if previous and (previous-safe).Magnitude<3 then
+                    if previous and (previous.pos-safe).Magnitude<3 then
                         previous.pos=safe
                     else
                         safePositions[#safePositions+1]={pos=safe}
